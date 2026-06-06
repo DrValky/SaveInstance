@@ -1786,19 +1786,24 @@ local function StreamEntireMap(O, report)
 	end
 
 	-- Streaming radius (prefer the live target radius) and a grid over the configured area
-	local radius = O.StreamingRadius or 1024
+	local radius = tonumber(O.StreamingRadius) or 1024
 	pcall(function()
 		radius = gethiddenproperty(workspace, "StreamingTargetRadius") or radius
 	end)
-	radius = math.max(radius, 64)
+	radius = math.max(tonumber(radius) or 1024, 64)
 
-	local half = (O.StreamingAreaSize or 10000) / 2
+	local half = (tonumber(O.StreamingAreaSize) or 10000) / 2
 	local step = radius -- one request per radius covers the area without gaps
-	local slices = math.max(1, O.StreamingSlices or 2)
-	local timeout = O.StreamingTimeout or 20
+	local slices = math.max(1, tonumber(O.StreamingSlices) or 2)
+	local timeout = tonumber(O.StreamingTimeout) or 20
 
-	local character = LocalPlayer.Character
-	local origin = (character and character:GetPivot().Position) or Vector3.new(0, 50, 0)
+	local origin = Vector3.new(0, 50, 0)
+	pcall(function() -- guarded so a GetPivot error can't leak the pinConn below / kill the save
+		local character = LocalPlayer.Character
+		if character then
+			origin = character:GetPivot().Position
+		end
+	end)
 
 	local points = {}
 	for x = origin.X - half, origin.X + half, step do
@@ -1819,30 +1824,32 @@ local function StreamEntireMap(O, report)
 	-- Fan out RequestStreamAroundAsync with bounded cooperative concurrency (each call yields
 	-- until its region is loaded). Lua coroutines don't preempt mid-statement, so the shared
 	-- counters below are safe without locks.
-	local concurrency = math.clamp(O.StreamingConcurrency or 8, 1, total)
+	local concurrency = math.clamp(tonumber(O.StreamingConcurrency) or 8, 1, total)
 	local nextIndex, done, activeWorkers = 0, 0, concurrency
 
 	for _ = 1, concurrency do
 		task.spawn(function()
-			while true do
-				nextIndex += 1
-				local point = points[nextIndex]
-				if not point then
-					break
-				end
-				local ok = pcall(function()
-					LocalPlayer:RequestStreamAroundAsync(point, timeout)
-				end)
-				if not ok then -- one quick retry on failure
-					pcall(function()
+			pcall(function() -- guard: a throw here must NOT skip `activeWorkers -= 1`, or the wait below hangs forever
+				while true do
+					nextIndex += 1
+					local point = points[nextIndex]
+					if not point then
+						return
+					end
+					local ok = pcall(function()
 						LocalPlayer:RequestStreamAroundAsync(point, timeout)
 					end)
+					if not ok then -- one quick retry on failure
+						pcall(function()
+							LocalPlayer:RequestStreamAroundAsync(point, timeout)
+						end)
+					end
+					done += 1
+					if report then
+						report(done, total)
+					end
 				end
-				done += 1
-				if report then
-					report(done, total)
-				end
-			end
+			end)
 			activeWorkers -= 1
 		end)
 	end
@@ -1894,8 +1901,8 @@ local function RunDecompilePrepass(ldeccache, O, report)
 	end
 
 	local apiUrl = O.PrepassApiUrl or "https://api.lua.expert/decompile"
-	local concurrency = math.max(1, O.PrepassConcurrency or 24)
-	local timeout = O.PrepassTimeout or 20
+	local concurrency = math.max(1, tonumber(O.PrepassConcurrency) or 24)
+	local timeout = tonumber(O.PrepassTimeout) or 20
 	local HttpService = service.HttpService
 
 	-- Gather unique client scripts (skip server scripts we can't read; dedupe by bytecode hash)
@@ -1943,12 +1950,14 @@ local function RunDecompilePrepass(ldeccache, O, report)
 	local function decompileViaApi(bc)
 		local settled, payload = false, nil
 		task.spawn(function()
-			local ok, res = pcall(HttpRequest, {
-				Url = apiUrl,
-				Method = "POST",
-				Headers = { ["content-type"] = "application/json" },
-				Body = HttpService:JSONEncode({ script = base64encode(bc) }),
-			})
+			local ok, res = pcall(function() -- encode INSIDE the pcall so a JSON/base64 error can't kill the worker
+				return HttpRequest({
+					Url = apiUrl,
+					Method = "POST",
+					Headers = { ["content-type"] = "application/json" },
+					Body = HttpService:JSONEncode({ script = base64encode(bc) }),
+				})
+			end)
 			if not settled then
 				settled, payload = true, { ok = ok, res = res }
 			end
@@ -1976,21 +1985,24 @@ local function RunDecompilePrepass(ldeccache, O, report)
 	local nextIndex, done, active = 0, 0, math.min(concurrency, total)
 	for _ = 1, active do
 		task.spawn(function()
-			while true do
-				nextIndex += 1
-				local job = jobs[nextIndex]
-				if not job then
-					break
+			pcall(function() -- guard: a throw here must NOT skip `active -= 1`, or the wait below hangs forever
+				while true do
+					nextIndex += 1
+					local job = jobs[nextIndex]
+					if not job then
+						return
+					end
+					local body = decompileViaApi(job.bc)
+					if body and body ~= "" then
+						-- strip null bytes like the normal decompile path does (they break the XML file)
+						ldeccache[job.key] = (string.gsub(body, "\0", "\\0"))
+					end
+					done += 1
+					if report then
+						report(done, total)
+					end
 				end
-				local body = decompileViaApi(job.bc)
-				if body and body ~= "" then
-					ldeccache[job.key] = body
-				end
-				done += 1
-				if report then
-					report(done, total)
-				end
-			end
+			end)
 			active -= 1
 		end)
 	end
