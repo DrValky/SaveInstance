@@ -1713,6 +1713,10 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 --- @field StreamingTimeout number -- * Seconds to wait per `RequestStreamAroundAsync` request. ___Default:___ 20
 --- @field StreamingConcurrency number -- * How many stream requests are kept in flight at once (higher = faster, more load). ___Default:___ 8
 --- @field StreamingSlices number -- * Vertical layers swept per grid cell; raise for tall maps. ___Default:___ 2
+--- @field DecompilePrepass boolean -- * **RISKY:** Before saving, decompiles every client script in parallel via an external API (`api.lua.expert`) and pre-fills the decompile cache, so the save's decompile step is near-instant. Big speedup on script-heavy games. Sends script bytecode to a third-party API; needs `getscriptbytecode` + an HTTP request function. ___Default:___ false
+--- @field PrepassConcurrency number -- * Parallel decompile requests kept in flight during the prepass. ___Default:___ 24
+--- @field PrepassTimeout number -- * Seconds to wait per prepass decompile request. ___Default:___ 20
+--- @field PrepassApiUrl string -- * Endpoint used by the decompile prepass. ___Default:___ "https://api.lua.expert/decompile"
 
 --- @interface OptionsAliases
 --- @within SynSaveInstance
@@ -1879,6 +1883,123 @@ local function StreamEntireMap(O, report)
 	return true
 end
 
+-- Decompilation prepass: decompiles every client script in PARALLEL via an external API and
+-- pre-fills the decompile cache (ldeccache, keyed by sha384(bytecode) exactly like ldecompile),
+-- so the save's per-script decompile becomes an instant cache hit. Inspired by centerepic/ussiprepass.
+-- Needs getscriptbytecode + an HTTP request function. Reports progress via report(done, total).
+local function RunDecompilePrepass(ldeccache, O, report)
+	local HttpRequest = request or http_request
+	if not (getscriptbytecode and HttpRequest and sha384 and base64encode) then
+		return false, "needs getscriptbytecode + request/http_request"
+	end
+
+	local apiUrl = O.PrepassApiUrl or "https://api.lua.expert/decompile"
+	local concurrency = math.max(1, O.PrepassConcurrency or 24)
+	local timeout = O.PrepassTimeout or 20
+	local HttpService = service.HttpService
+
+	-- Gather unique client scripts (skip server scripts we can't read; dedupe by bytecode hash)
+	local seen, jobs = {}, {}
+	local function consider(o)
+		local okIsA, isLSC = pcall(function()
+			return o:IsA("LuaSourceContainer")
+		end)
+		if not (okIsA and isLSC) then
+			return
+		end
+		if o:IsA("Script") then
+			local rc = o.RunContext
+			if rc == Enum.RunContext.Server or rc == Enum.RunContext.Legacy then
+				return -- server scripts cannot be decompiled client-side
+			end
+		end
+		local ok, bc = pcall(getscriptbytecode, o)
+		if ok and type(bc) == "string" and bc ~= "" then
+			local key = sha384(bc)
+			if not seen[key] and ldeccache[key] == nil then
+				seen[key] = true
+				jobs[#jobs + 1] = { key = key, bc = bc }
+			end
+		end
+	end
+
+	for _, o in game:GetDescendants() do
+		pcall(consider, o)
+	end
+	if getloadedmodules then
+		local ok, mods = pcall(getloadedmodules)
+		if ok and type(mods) == "table" then
+			for _, m in mods do
+				pcall(consider, m)
+			end
+		end
+	end
+
+	local total = #jobs
+	if total == 0 then
+		return true
+	end
+
+	local function decompileViaApi(bc)
+		local settled, payload = false, nil
+		task.spawn(function()
+			local ok, res = pcall(HttpRequest, {
+				Url = apiUrl,
+				Method = "POST",
+				Headers = { ["content-type"] = "application/json" },
+				Body = HttpService:JSONEncode({ script = base64encode(bc) }),
+			})
+			if not settled then
+				settled, payload = true, { ok = ok, res = res }
+			end
+		end)
+		local deadline = os.clock() + timeout
+		while not settled and os.clock() < deadline do
+			task.wait(0.05)
+		end
+		if not settled then
+			settled = true
+			return nil
+		end
+		if not payload.ok then
+			return nil
+		end
+		local res = payload.res
+		if not res or res.StatusCode ~= 200 then
+			return nil
+		end
+		return res.Body
+	end
+
+	-- Bounded cooperative concurrency (Lua coroutines don't preempt mid-statement, so the
+	-- shared counters are safe without locks).
+	local nextIndex, done, active = 0, 0, math.min(concurrency, total)
+	for _ = 1, active do
+		task.spawn(function()
+			while true do
+				nextIndex += 1
+				local job = jobs[nextIndex]
+				if not job then
+					break
+				end
+				local body = decompileViaApi(job.bc)
+				if body and body ~= "" then
+					ldeccache[job.key] = body
+				end
+				done += 1
+				if report then
+					report(done, total)
+				end
+			end
+			active -= 1
+		end)
+	end
+	while active > 0 do
+		task.wait(0.1)
+	end
+	return true
+end
+
 local function synsaveinstance(CustomOptions, CustomOptions2)
 	if GLOBAL_ENV.USSI then
 		return
@@ -1987,6 +2108,12 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		StreamingTimeout = 20, -- seconds per RequestStreamAroundAsync request
 		StreamingConcurrency = 8, -- how many stream requests are kept in flight at once
 		StreamingSlices = 2, -- vertical layers (raise for tall maps)
+
+		-- * Decompilation prepass: parallel-decompile all client scripts via an external API before saving (big speedup on script-heavy games). RISKY: sends script bytecode to a third-party API.
+		DecompilePrepass = false,
+		PrepassConcurrency = 24, -- parallel decompile requests kept in flight
+		PrepassTimeout = 20, -- seconds per decompile request
+		PrepassApiUrl = "https://api.lua.expert/decompile",
 
 		OptionsAliases = { -- You can't really modify these as a user
 			Streaming = "SetStreaming",
@@ -3625,6 +3752,26 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			end)
 			if not streamOk and __DEBUG_MODE then
 				__DEBUG_MODE("Streaming skipped", streamReason)
+			end
+			if ProgressFill then -- reset the bar for the save phase
+				ProgressFill.Size = UDim2.new(0, 0, 1, 0)
+			end
+		end
+
+		if OPTIONS.DecompilePrepass and not OPTIONS.noscripts and ScriptCache and ldeccache then
+			if StatusText then
+				StatusText.Text = "Decompiling scripts (prepass)..."
+			end
+			local prepassOk, prepassReason = RunDecompilePrepass(ldeccache, OPTIONS, function(decompiled, totalScripts)
+				if StatusText then
+					StatusText.Text = string.format("Decompile prepass: %d / %d scripts", decompiled, totalScripts)
+				end
+				if ProgressFill and totalScripts > 0 then
+					ProgressFill.Size = UDim2.new(decompiled / totalScripts, 0, 1, 0)
+				end
+			end)
+			if not prepassOk and __DEBUG_MODE then
+				__DEBUG_MODE("Decompile prepass skipped", prepassReason)
 			end
 			if ProgressFill then -- reset the bar for the save phase
 				ProgressFill.Size = UDim2.new(0, 0, 1, 0)

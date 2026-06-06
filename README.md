@@ -1,6 +1,6 @@
 # SaveInstance (Modified) — Full Union & Terrain Support
 
-A modified build of [UniversalSynSaveInstance (USSI)](https://github.com/luau/UniversalSynSaveInstance) with fixes for correctly saving **UnionOperations** (CSG `MeshData2` geometry) and **Terrain** (`SmoothGrid` / `PhysicsGrid`).
+A modified build of [UniversalSynSaveInstance (USSI)](https://github.com/luau/UniversalSynSaveInstance) that correctly saves **UnionOperations** (CSG `MeshData2` geometry) and **Terrain**, with optional **full-map streaming** and a **parallel decompile prepass** for fast, complete saves of big games.
 
 ## Usage
 
@@ -12,38 +12,40 @@ local Params = {
 
 local synsaveinstance = loadstring(game:HttpGet(Params.RepoURL .. Params.SSI .. ".luau", true), Params.SSI)()
 
-local Options = { safemode = false } -- Docs: https://luau.github.io/UniversalSynSaveInstance/api/SynSaveInstance
+local Options = {
+    safemode = false,
+    SetStreaming = true,     -- force-load the entire StreamingEnabled map first (whole map, not just nearby chunks)
+    DecompilePrepass = true, -- decompile all scripts in parallel before saving (big speedup on script-heavy games)
+    -- Full option list: https://luau.github.io/UniversalSynSaveInstance/api/SynSaveInstance
+}
+
 synsaveinstance(Options)
 ```
+
+`SetStreaming` and `DecompilePrepass` are **off by default** — turn on the ones you need. It all runs from this one call; no separate scripts required.
 
 ## What's different from the normal save instance
 
 - **Unions render correctly.** Re-enabled `gethiddenproperty` during the save (it was being disabled unconditionally) so the union's `MeshData2` is actually read, and stopped `IgnoreSharedStrings` from dropping the `MeshData2` / `ChildData2` SharedStrings. On executors that can't read union mesh data, unions fall back to a visible bounding-box Part instead of being invisible.
 - **Terrain** `SmoothGrid` / `PhysicsGrid` are serialized.
-- **`SetStreaming`** — optionally force-loads an entire `StreamingEnabled` map before saving (see below).
+- **`SetStreaming`** — force-loads an entire `StreamingEnabled` map before saving so the whole map is captured (see below).
+- **`DecompilePrepass`** — decompiles every client script in parallel before saving so the save's decompile step is near-instant (see below).
 - **Faster, lighter saves** — the file is assembled with a table buffer instead of repeated string concatenation, fixing the `O(n²)` growth that caused "not enough memory" on large games.
 - A progress bar accompanies the on-screen save status.
 
 > Note: `ChildData` is `NotReplicated`, so client-side saves render unions but can't make them editable/separable in Studio.
 
-## Map streaming (StreamingEnabled games)
+## Map streaming — `SetStreaming`
 
-Many big maps use **StreamingEnabled**, which only loads the chunks near your character — so a normal save captures just a fraction of the map. Set `SetStreaming = true` and the tool sweeps the whole map (pinning loaded content so it can't stream back out) **before** saving, so you get the entire thing in one shot — no flying around manually.
+Many big maps use **StreamingEnabled**, which only loads the chunks near your character — so a normal save captures just a fraction of the map. With `SetStreaming = true`, the tool pins all loaded content (`ModelStreamingMode = Persistent`) so nothing streams back out, then sweeps the whole map firing **concurrent** `RequestStreamAroundAsync` requests (each yields when its region loads — faster than teleport-and-poll). Runs headlessly with progress in the status bar, then saving begins automatically. Expect lag on large maps.
 
-```lua
-local Options = {
-    SetStreaming = true, -- force-load the whole map first, then save
-    -- optional tuning (defaults shown):
-    -- StreamingAreaSize = 10000,  -- studs swept around your start position
-    -- StreamingRadius = 1024,     -- per-request radius (auto-detected when possible)
-    -- StreamingConcurrency = 8,   -- requests kept in flight (higher = faster, more load)
-    -- StreamingSlices = 2,        -- vertical layers (raise for tall maps)
-    -- StreamingTimeout = 20,
-}
-synsaveinstance(Options)
-```
+Tunables (defaults): `StreamingAreaSize` (10000), `StreamingRadius` (1024, auto-detected when possible), `StreamingConcurrency` (8), `StreamingSlices` (2), `StreamingTimeout` (20). Based on / speeds up [centerepic/Streamer7](https://github.com/centerepic/Streamer7).
 
-Runs headlessly (progress shows in the save status bar), then saving begins automatically. Expect lag on large maps while it streams. This integrates and speeds up the approach from [centerepic/Streamer7](https://github.com/centerepic/Streamer7) — instead of teleport-and-poll per chunk, it fans out concurrent `RequestStreamAroundAsync` requests that each yield when their region is loaded.
+## Decompile prepass — `DecompilePrepass`
+
+Decompiling scripts is the slowest part of a save. With `DecompilePrepass = true`, every client script is decompiled **in parallel** (via an external API) and cached *before* saving, so the save's per-script decompile becomes an instant cache hit — a big speedup on script-heavy games.
+
+> Heads-up: this sends script bytecode to a **third-party API** (`api.lua.expert`) and needs `getscriptbytecode` plus an HTTP function (`request` / `http_request`). It's **off by default** for that reason. Tunables: `PrepassConcurrency` (24), `PrepassTimeout` (20), `PrepassApiUrl`. Based on [centerepic/ussiprepass](https://gitlab.com/centerepic/ussiprepass).
 
 ## Credits
 
@@ -52,5 +54,7 @@ All credit for the original SaveInstance goes to the **luau** project — please
 - Project home & docs: **[luau.github.io](https://luau.github.io/)**
 - Source: [luau/UniversalSynSaveInstance](https://github.com/luau/UniversalSynSaveInstance)
 - API reference: [luau.github.io/UniversalSynSaveInstance/api/SynSaveInstance](https://luau.github.io/UniversalSynSaveInstance/api/SynSaveInstance)
+
+Streaming & prepass approaches by [centerepic](https://github.com/centerepic) ([Streamer7](https://github.com/centerepic/Streamer7), [ussiprepass](https://gitlab.com/centerepic/ussiprepass)).
 
 Modified by **Robloxscripts.com** — Discord: discord.robloxscripts.com
