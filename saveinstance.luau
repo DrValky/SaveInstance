@@ -1707,6 +1707,12 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 --- @field IgnoreSharedStrings boolean -- * **RISKY: FIXES CRASHES (TEMPORARY, TESTED ON ROEXEC ONLY). FEEL FREE TO DISABLE THIS TO SEE IF IT WORKS FOR YOU**. ___Default:___ true
 --- @field SharedStringOverwrite boolean -- * **RISKY:** if the process is not finished aka crashed then none of the affected values will be available. SharedStrings can also be used for ValueTypes that aren't `SharedString`, this behavior is not documented anywhere but makes sense (Could create issues though, due to _potential_ ValueType mix-up, only works on certain types which are all base64 encoded so far). Reason: Allows for potential smaller file size (can also be bigger in some cases). ___Default:___ false
 --- @field TreatUnionsAsParts boolean -- * **RISKY:** Converts all UnionOperations to Parts. Useful if your Executor isn't able to save (read) Unions, because otherwise they will be invisible. ___Default:___ false (except Solara)
+--- @field SetStreaming boolean -- * Before saving, force-loads an entire `StreamingEnabled` map into memory so saveinstance captures the WHOLE map instead of only the chunks near you. Pins loaded content (`ModelStreamingMode = Persistent`) so nothing streams back out, then sweeps a grid with `RequestStreamAroundAsync`. Can be slow and laggy on large maps. ___Aliases:___ `Streaming`. ___Default:___ false
+--- @field StreamingAreaSize number -- * Side length (studs) of the square area swept around your starting position when `SetStreaming` is on. ___Default:___ 10000
+--- @field StreamingRadius number -- * Per-request stream radius. Auto-uses the game's `StreamingTargetRadius` when readable. ___Default:___ 1024
+--- @field StreamingTimeout number -- * Seconds to wait per `RequestStreamAroundAsync` request. ___Default:___ 20
+--- @field StreamingConcurrency number -- * How many stream requests are kept in flight at once (higher = faster, more load). ___Default:___ 8
+--- @field StreamingSlices number -- * Vertical layers swept per grid cell; raise for tall maps. ___Default:___ 2
 
 --- @interface OptionsAliases
 --- @within SynSaveInstance
@@ -1741,6 +1747,138 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 	@param Parameter_2 table -- [OPTIONAL] If present, then Parameter_2 will be assumed to be [SynSaveInstance.CustomOptions table]. And then if the Parameter_1 is an Instance, then it will be assumed to be [SynSaveInstance.CustomOptions table].Object. If Parameter_1 is a table filled with instances ({Instance}), then it will be assumed to be [SynSaveInstance.CustomOptions table].ExtraInstances and IsModel will be true). This exists for sake compatibility with `saveinstance(game, {})`
 ]=]
 
+-- Force-loads an entire StreamingEnabled map into memory before saving, so saveinstance captures
+-- the whole map instead of only the chunks near the player (inspired by centerepic's Streamer7).
+-- It pins loaded content (ModelStreamingMode = Persistent) so it can't stream back out, then fans
+-- out Player:RequestStreamAroundAsync over a grid with bounded concurrency. RequestStreamAroundAsync
+-- yields until each region is loaded, which is far faster than the original teleport-then-poll loop.
+-- Headless; calls report(done, total) for progress. Returns true, or false + reason if it can't run.
+local function StreamEntireMap(O, report)
+	if not workspace.StreamingEnabled then
+		return false, "StreamingEnabled is off (nothing to stream)"
+	end
+
+	local LocalPlayer = service.Players.LocalPlayer
+	if not LocalPlayer then
+		return false, "No LocalPlayer (cannot stream)"
+	end
+
+	-- Pin loaded content so it can't stream back out while we sweep the map
+	pcall(function()
+		if sethiddenproperty then
+			sethiddenproperty(workspace, "StreamOutBehavior", Enum.StreamOutBehavior.Default)
+		end
+	end)
+	local function pin(obj)
+		if obj:IsA("Model") then
+			pcall(function()
+				obj.ModelStreamingMode = Enum.ModelStreamingMode.Persistent
+			end)
+		end
+	end
+	local pinConn = workspace.DescendantAdded:Connect(pin)
+	for _, descendant in workspace:GetDescendants() do
+		pin(descendant)
+	end
+
+	-- Streaming radius (prefer the live target radius) and a grid over the configured area
+	local radius = O.StreamingRadius or 1024
+	pcall(function()
+		radius = gethiddenproperty(workspace, "StreamingTargetRadius") or radius
+	end)
+	radius = math.max(radius, 64)
+
+	local half = (O.StreamingAreaSize or 10000) / 2
+	local step = radius -- one request per radius covers the area without gaps
+	local slices = math.max(1, O.StreamingSlices or 2)
+	local timeout = O.StreamingTimeout or 20
+
+	local character = LocalPlayer.Character
+	local origin = (character and character:GetPivot().Position) or Vector3.new(0, 50, 0)
+
+	local points = {}
+	for x = origin.X - half, origin.X + half, step do
+		for z = origin.Z - half, origin.Z + half, step do
+			for slice = 0, slices - 1 do
+				local yOffset = (slice - math.floor((slices - 1) / 2)) * (radius * 0.8)
+				points[#points + 1] = Vector3.new(x, origin.Y + yOffset, z)
+			end
+		end
+	end
+
+	local total = #points
+	if total == 0 then
+		pinConn:Disconnect()
+		return true
+	end
+
+	-- Fan out RequestStreamAroundAsync with bounded cooperative concurrency (each call yields
+	-- until its region is loaded). Lua coroutines don't preempt mid-statement, so the shared
+	-- counters below are safe without locks.
+	local concurrency = math.clamp(O.StreamingConcurrency or 8, 1, total)
+	local nextIndex, done, activeWorkers = 0, 0, concurrency
+
+	for _ = 1, concurrency do
+		task.spawn(function()
+			while true do
+				nextIndex += 1
+				local point = points[nextIndex]
+				if not point then
+					break
+				end
+				local ok = pcall(function()
+					LocalPlayer:RequestStreamAroundAsync(point, timeout)
+				end)
+				if not ok then -- one quick retry on failure
+					pcall(function()
+						LocalPlayer:RequestStreamAroundAsync(point, timeout)
+					end)
+				end
+				done += 1
+				if report then
+					report(done, total)
+				end
+			end
+			activeWorkers -= 1
+		end)
+	end
+
+	-- Lightly drive the character across the grid so player-centric streaming reinforces the sweep
+	task.spawn(function()
+		local stride = math.max(1, math.floor(total / 24))
+		local i = 1
+		while activeWorkers > 0 do
+			local point = points[i]
+			if point then
+				pcall(function()
+					local char = LocalPlayer.Character
+					if char then
+						char:PivotTo(CFrame.new(point))
+					end
+				end)
+			end
+			i += stride
+			if i > total then
+				i = 1
+			end
+			task.wait(0.15)
+		end
+	end)
+
+	while activeWorkers > 0 do
+		task.wait(0.1)
+	end
+
+	pinConn:Disconnect()
+	pcall(function() -- return the character home
+		local char = LocalPlayer.Character
+		if char then
+			char:PivotTo(CFrame.new(origin))
+		end
+	end)
+	return true
+end
+
 local function synsaveinstance(CustomOptions, CustomOptions2)
 	if GLOBAL_ENV.USSI then
 		return
@@ -1753,7 +1891,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		end
 	end
 
-	local currentstr, currentsize, totalsize, chunks = "", 0, 0, table.create(1)
+	local currentparts, currentsize, totalsize, chunks = {}, 0, 0, table.create(1) -- ! currentparts holds string pieces that get concatenated once per chunk (avoids the O(n^2) growth of `..=` that caused "not enough memory")
 	local savebuffer, savebuffer_size = {}, 1
 	local header =
 		'<!-- Saved by USSI modded by Robloxscripts.com (Join the Discord) discord.robloxscripts.com --><roblox version="4">'
@@ -1842,7 +1980,16 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		TreatUnionsAsParts = not gethiddenproperty or ArrayToDict({ "Fluxus", "Delta", "Solara" })[EXECUTOR_NAME] or false, -- * Executors that can't read union mesh (no/broken gethiddenproperty, or those where special props are ignored for stability) fall back to a visible Part (bounding box) instead of an invisible union. Executors with working gethiddenproperty save the full union mesh.
 		AlternativeWritefile = not ArrayToDict({ "WRD", "Xeno", "Zorara" })[EXECUTOR_NAME],
 
+		-- * Map streaming: force-load a StreamingEnabled map before saving so the WHOLE map is captured (not just chunks near you)
+		SetStreaming = false,
+		StreamingAreaSize = 10000, -- studs (square) swept around your start position
+		StreamingRadius = 1024, -- per-request radius; auto-uses the game's StreamingTargetRadius when readable
+		StreamingTimeout = 20, -- seconds per RequestStreamAroundAsync request
+		StreamingConcurrency = 8, -- how many stream requests are kept in flight at once
+		StreamingSlices = 2, -- vertical layers (raise for tall maps)
+
 		OptionsAliases = { -- You can't really modify these as a user
+			Streaming = "SetStreaming",
 			DecompileTimeout = "timeout",
 			FileName = "FilePath",
 			IgnoreArchivable = "IgnoreNotArchivable",
@@ -2569,7 +2716,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	local CHUNK_LIMIT = 200 * 1024 * 1024 -- string length overflow prevention
 	local function save_cache(final)
 		local savestr = table.concat(savebuffer)
-		currentstr ..= savestr -- TODO: Causes "not enough memory" error on some exec
+		currentparts[#currentparts + 1] = savestr -- * O(1) append; the chunk string is built once at the boundary below (was `currentstr ..= savestr`, which rebuilt the whole string each call -> O(n^2) + "not enough memory")
 
 		-- writefile(placename, totalstr)
 		-- appendfile(placename, savestr) -- * supposedly causes uneven amount of Tags (e.g. <Item> must be closed with </Item> but sometimes there's more of one than the other). While being under load, the function produces unexpected output?
@@ -2581,8 +2728,9 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		savebuffer_size = 1
 
 		if CHUNK_LIMIT < currentsize or final then
-			table.insert(chunks, { size = currentsize, str = currentstr })
-			currentstr, currentsize = "", 0
+			table.insert(chunks, { size = currentsize, str = table.concat(currentparts) }) -- * Build this chunk's string once from its pieces
+			table.clear(currentparts)
+			currentsize = 0
 		end
 
 		if StatusText then
@@ -3461,6 +3609,26 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 					)
 				end)
 			end)
+		end
+
+		if OPTIONS.SetStreaming then
+			if StatusText then
+				StatusText.Text = "Streaming map in (this can take a while)..."
+			end
+			local streamOk, streamReason = StreamEntireMap(OPTIONS, function(streamed, totalChunks)
+				if StatusText then
+					StatusText.Text = string.format("Streaming map: %d / %d chunks", streamed, totalChunks)
+				end
+				if ProgressFill and totalChunks > 0 then
+					ProgressFill.Size = UDim2.new(streamed / totalChunks, 0, 1, 0)
+				end
+			end)
+			if not streamOk and __DEBUG_MODE then
+				__DEBUG_MODE("Streaming skipped", streamReason)
+			end
+			if ProgressFill then -- reset the bar for the save phase
+				ProgressFill.Size = UDim2.new(0, 0, 1, 0)
+			end
 		end
 
 		elapse_t = os.clock()
