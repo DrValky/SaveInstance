@@ -31,6 +31,8 @@ synsaveinstance(Options)
 - **`SetStreaming`** — force-loads an entire `StreamingEnabled` map before saving so the whole map is captured (see below).
 - **`DecompilePrepass`** — decompiles every client script in parallel before saving so the save's decompile step is near-instant (see below).
 - **Faster, lighter saves** — the file is assembled with a table buffer instead of repeated string concatenation, fixing the `O(n²)` growth that caused "not enough memory" on large games.
+- **Executor capability check** — on each save it prints (console) which required functions your executor is missing (`gethiddenproperty`, `decompile`, `request`, `sethiddenproperty`, …) and the impact, so you know up front why a save might be incomplete.
+- **`UseUGCValidationService`** (default `true`) — set `false` to never use `UGCValidationService` as a hidden-property fallback (some executors flag or lack it); `gethiddenproperty` is still used.
 - A progress bar accompanies the on-screen save status.
 
 > Note: `ChildData` is `NotReplicated`, so client-side saves render unions but can't make them editable/separable in Studio.
