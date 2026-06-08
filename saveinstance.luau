@@ -1707,6 +1707,7 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 --- @field IgnoreNotArchivable boolean -- Ignores the Archivable property and saves Non-Archivable instances. ___Default:___ true
 --- @field IgnorePropertiesOfNotScriptsOnScriptsMode boolean -- Ignores property of every instance that is not a script in "scripts" mode. ___Default:___ false
 --- @field IgnoreSpecialProperties boolean -- Prevents calls to `gethiddenproperty` and uses fallback methods instead. This also helps with crashes. If your file is corrupted after saving, you can try turning this on. ___Default:___ false
+--- @field UseUGCValidationService boolean -- * When `false`, the script never uses `UGCValidationService:GetPropertyValue` as a hidden-property fallback (some executors flag or lack it). `gethiddenproperty` is still used; only the UGC fallback is disabled. ___Default:___ true
 --- @field IsolateLocalPlayer boolean -- Saves Children of LocalPlayer as separate folder and prevents any instance of ClassName Player with .Name identical to LocalPlayer.Name from saving. ___Default:___ false
 --- @field IsolateStarterPlayer boolean -- If enabled, StarterPlayer will be cleared and the saved starter player will be placed into folders. ___Default:___ false
 --- @field IsolateLocalPlayerCharacter boolean -- Saves Children of LocalPlayer.Character as separate folder and prevents any instance of ClassName Player with .Name identical to LocalPlayer.Name from saving. ___Default:___ false
@@ -2041,6 +2042,37 @@ local function RunDecompilePrepass(ldeccache, O, report)
 	return true
 end
 
+-- Reports executor capabilities that affect the save so the user knows up front WHY a save might
+-- be incomplete (e.g. no gethiddenproperty => Unions/Terrain won't save). Warns to the console.
+local function report_executor_support(O)
+	local missing = {}
+	if not gethiddenproperty then
+		missing[#missing + 1] = "gethiddenproperty  ->  Unions, Terrain & other hidden/special properties will NOT save correctly"
+	elseif O.IgnoreSpecialProperties then
+		missing[#missing + 1] = "gethiddenproperty is DISABLED here (IgnoreSpecialProperties, for stability)  ->  Unions save as bounding-box Parts, not full mesh"
+	end
+	if not getscriptbytecode then
+		missing[#missing + 1] = "getscriptbytecode  ->  script caching disabled"
+	end
+	if not decompile and not O.noscripts then
+		missing[#missing + 1] = "decompile  ->  scripts will not be decompiled"
+	end
+	if O.SetStreaming and not sethiddenproperty then
+		missing[#missing + 1] = "sethiddenproperty  ->  SetStreaming can't fully pin streamed content (may be less reliable)"
+	end
+	if O.DecompilePrepass and not (request or http_request) then
+		missing[#missing + 1] = "request/http_request  ->  DecompilePrepass can't reach the decompile API (it will be skipped)"
+	end
+	if #missing == 0 then
+		return
+	end
+	warn("[saveinstance] Executor '" .. (EXECUTOR_NAME ~= "" and EXECUTOR_NAME or "Unknown") .. "' — some capabilities are unavailable; the save may be incomplete:")
+	for _, m in missing do
+		warn("   - " .. m)
+	end
+	return missing
+end
+
 local function synsaveinstance(CustomOptions, CustomOptions2)
 	if GLOBAL_ENV.USSI then
 		return
@@ -2109,6 +2141,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		IgnoreNotArchivable = true,
 		IgnorePropertiesOfNotScriptsOnScriptsMode = false,
 		IgnoreSpecialProperties = ArrayToDict({ "Fluxus", "Delta", "Solara" })[EXECUTOR_NAME] or false, -- ! Please submit more Executors that crash on gethiddenproperty (with this disabled basically)
+		UseUGCValidationService = true, -- * When false, never use UGCValidationService as a hidden-property fallback (some executors flag/lack it). gethiddenproperty is still used.
 
 		IsolateLocalPlayer = false, --  #service.StarterGui:GetChildren() == 0
 		IsolateLocalPlayerCharacter = false,
@@ -2331,6 +2364,8 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	local IgnoreNotArchivable = not OPTIONS.IgnoreNotArchivable
 	local IgnorePropertiesOfNotScriptsOnScriptsMode = OPTIONS.IgnorePropertiesOfNotScriptsOnScriptsMode
 
+	report_executor_support(OPTIONS) -- tell the user up front about any missing capabilities (must run before gethiddenproperty is possibly disabled below)
+
 	local old_gethiddenproperty
 	if OPTIONS.IgnoreSpecialProperties and gethiddenproperty then -- ? Only disable gethiddenproperty when the user opts into IgnoreSpecialProperties. Previously this read `if OPTIONS` (always truthy), which disabled gethiddenproperty for EVERY save and forced special props (e.g. Union MeshData2) through UGCValidationService, which can't read CSG blobs -> unions saved with no mesh.
 		old_gethiddenproperty = gethiddenproperty
@@ -2348,6 +2383,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 
 	local Timeout = OPTIONS.timeout
 
+	local UseUGCValidationService = OPTIONS.UseUGCValidationService
 	local IgnoreSharedStrings = OPTIONS.IgnoreSharedStrings
 	local SharedStringOverwrite = OPTIONS.SharedStringOverwrite
 
@@ -3074,7 +3110,10 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						local raw = ReadProperty(instance, Property, PropertyName, Special, Category, Optional)
 
 						if raw == __BREAK then -- ! Assuming __BREAK is always returned when there's a failure to read a property
-							local ok, result = pcall(gethiddenproperty_fallback, instance, PropertyName) -- * This helps in reading: Vector3int16, OptionalCoordinateFrame DataTypes. It also acts as an almost entire fallback for gethiddenproperty in case it is missing
+							local ok, result
+							if UseUGCValidationService then -- * Toggle: when off, never touch UGCValidationService (some executors flag/lack it)
+								ok, result = pcall(gethiddenproperty_fallback, instance, PropertyName) -- * This helps in reading: Vector3int16, OptionalCoordinateFrame DataTypes. It also acts as an almost entire fallback for gethiddenproperty in case it is missing
+							end
 
 							if result == nil and not Optional then
 								ok = nil
