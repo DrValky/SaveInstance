@@ -43,11 +43,13 @@ Many big maps use **StreamingEnabled**, which only loads the chunks near your ch
 
 Tunables (defaults): `StreamingAreaSize` (10000), `StreamingRadius` (1024, auto-detected when possible), `StreamingConcurrency` (8), `StreamingSlices` (2), `StreamingTimeout` (20). Based on / speeds up [centerepic/Streamer7](https://github.com/centerepic/Streamer7).
 
-## Decompile prepass — `DecompilePrepass`
+## Decompiling — lua.expert fallback + `DecompilePrepass`
 
-Decompiling scripts is the slowest part of a save. With `DecompilePrepass = true`, every client script is decompiled **in parallel** (via an external API) and cached *before* saving, so the save's per-script decompile becomes an instant cache hit — a big speedup on script-heavy games.
+If your executor has **no decompiler** (e.g. Volt), scripts are automatically decompiled via the **[lua.expert](https://lua.expert)** free API instead of being saved as "no decompiler" stubs. Decompiled scripts are credited to lua.expert in their header.
 
-> Heads-up: this sends script bytecode to a **third-party API** (`api.lua.expert`) and needs `getscriptbytecode` plus an HTTP function (`request` / `http_request`). It's **off by default** for that reason. Tunables: `PrepassConcurrency` (24), `PrepassTimeout` (20), `PrepassApiUrl`. Based on [centerepic/ussiprepass](https://gitlab.com/centerepic/ussiprepass).
+`DecompilePrepass = true` makes this fast on script-heavy games: every client script is decompiled **in parallel** via the API and cached *before* saving, so the save's per-script decompile becomes an instant cache hit. Without the prepass, scripts are decompiled on demand during the save (slower, but still works).
+
+> Heads-up: this sends script bytecode to a **third-party API** (`api.lua.expert`) and needs `getscriptbytecode` plus an HTTP function (`request` / `http_request`). `DecompilePrepass` is **off by default**. Tunables: `PrepassConcurrency` (24), `PrepassTimeout` (20), `PrepassApiUrl`. Based on [centerepic/ussiprepass](https://gitlab.com/centerepic/ussiprepass); decompiler API by [lua.expert](https://discord.com/invite/y63m4zUYa4).
 
 ## Credits
 
@@ -58,5 +60,7 @@ All credit for the original SaveInstance goes to the **luau** project — please
 - API reference: [luau.github.io/UniversalSynSaveInstance/api/SynSaveInstance](https://luau.github.io/UniversalSynSaveInstance/api/SynSaveInstance)
 
 Streaming & prepass approaches by [centerepic](https://github.com/centerepic) ([Streamer7](https://github.com/centerepic/Streamer7), [ussiprepass](https://gitlab.com/centerepic/ussiprepass)).
+
+Decompiler API: **[lua.expert](https://lua.expert)** — free decompiler ([Discord](https://discord.com/invite/y63m4zUYa4)).
 
 Modified by **Robloxscripts.com** — Discord: discord.robloxscripts.com
