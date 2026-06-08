@@ -49,7 +49,7 @@ If your executor has **no decompiler** (e.g. Volt), scripts are automatically de
 
 `DecompilePrepass = true` makes this fast on script-heavy games: every client script is decompiled **in parallel** via the API and cached *before* saving, so the save's per-script decompile becomes an instant cache hit. Without the prepass, scripts are decompiled on demand during the save (slower, but still works).
 
-> Heads-up: this sends script bytecode to a **third-party API** (`api.lua.expert`) and needs `getscriptbytecode` plus an HTTP function (`request` / `http_request`). `DecompilePrepass` is **off by default**. Tunables: `PrepassConcurrency` (24), `PrepassTimeout` (20), `PrepassApiUrl`. Based on [centerepic/ussiprepass](https://gitlab.com/centerepic/ussiprepass); decompiler API by [lua.expert](https://discord.com/invite/y63m4zUYa4).
+> Heads-up: this sends script bytecode to a **third-party API** (`api.lua.expert`) and needs `getscriptbytecode` plus an HTTP function (`request` / `http_request`). `DecompilePrepass` is **off by default**. Tunables: `PrepassConcurrency` (24), `PrepassTimeout` (20), `PrepassRateGap` (0.12 — min seconds between API requests; lower = faster if the API allows, raise if you get failures), `PrepassApiUrl`. Based on [centerepic/ussiprepass](https://gitlab.com/centerepic/ussiprepass); decompiler API by [lua.expert](https://discord.com/invite/y63m4zUYa4).
 
 ## Credits
 
