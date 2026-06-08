@@ -1917,6 +1917,48 @@ end
 -- pre-fills the decompile cache (ldeccache, keyed by sha384(bytecode) exactly like ldecompile),
 -- so the save's per-script decompile becomes an instant cache hit. Inspired by centerepic/ussiprepass.
 -- Needs getscriptbytecode + an HTTP request function. Reports progress via report(done, total).
+-- Decompiles bytecode via an external HTTP API (default lua.expert). Returns the source, or nil.
+-- Shared by DecompilePrepass and by the auto-fallback decompiler (executors without their own).
+local function decompile_via_api(bc, apiUrl, timeout)
+	local HttpRequest = request or http_request
+	if not (HttpRequest and base64encode) then
+		return nil
+	end
+	apiUrl = apiUrl or "https://api.lua.expert/decompile"
+	timeout = timeout or 20
+	local HttpService = service.HttpService
+	local settled, payload = false, nil
+	task.spawn(function()
+		local ok, res = pcall(function() -- encode INSIDE the pcall so a JSON/base64 error can't kill this
+			return HttpRequest({
+				Url = apiUrl,
+				Method = "POST",
+				Headers = { ["content-type"] = "application/json" },
+				Body = HttpService:JSONEncode({ script = base64encode(bc) }),
+			})
+		end)
+		if not settled then
+			settled, payload = true, { ok = ok, res = res }
+		end
+	end)
+	local deadline = os.clock() + timeout
+	while not settled and os.clock() < deadline do
+		task.wait(0.05)
+	end
+	if not settled then
+		settled = true
+		return nil
+	end
+	if not payload.ok then
+		return nil
+	end
+	local res = payload.res
+	if not res or res.StatusCode ~= 200 then
+		return nil
+	end
+	return res.Body
+end
+
 local function RunDecompilePrepass(ldeccache, O, report)
 	local HttpRequest = request or http_request
 	if not (getscriptbytecode and HttpRequest and sha384 and base64encode) then
@@ -1926,7 +1968,6 @@ local function RunDecompilePrepass(ldeccache, O, report)
 	local apiUrl = O.PrepassApiUrl or "https://api.lua.expert/decompile"
 	local concurrency = math.max(1, tonumber(O.PrepassConcurrency) or 24)
 	local timeout = tonumber(O.PrepassTimeout) or 20
-	local HttpService = service.HttpService
 
 	-- Gather unique client scripts (skip server scripts we can't read; dedupe by bytecode hash)
 	local seen, jobs = {}, {}
@@ -1977,39 +2018,6 @@ local function RunDecompilePrepass(ldeccache, O, report)
 		return true
 	end
 
-	local function decompileViaApi(bc)
-		local settled, payload = false, nil
-		task.spawn(function()
-			local ok, res = pcall(function() -- encode INSIDE the pcall so a JSON/base64 error can't kill the worker
-				return HttpRequest({
-					Url = apiUrl,
-					Method = "POST",
-					Headers = { ["content-type"] = "application/json" },
-					Body = HttpService:JSONEncode({ script = base64encode(bc) }),
-				})
-			end)
-			if not settled then
-				settled, payload = true, { ok = ok, res = res }
-			end
-		end)
-		local deadline = os.clock() + timeout
-		while not settled and os.clock() < deadline do
-			task.wait(0.05)
-		end
-		if not settled then
-			settled = true
-			return nil
-		end
-		if not payload.ok then
-			return nil
-		end
-		local res = payload.res
-		if not res or res.StatusCode ~= 200 then
-			return nil
-		end
-		return res.Body
-	end
-
 	-- Bounded cooperative concurrency (Lua coroutines don't preempt mid-statement, so the
 	-- shared counters are safe without locks).
 	local nextIndex, done, active = 0, 0, math.min(concurrency, total)
@@ -2022,7 +2030,7 @@ local function RunDecompilePrepass(ldeccache, O, report)
 					if not job then
 						return
 					end
-					local body = decompileViaApi(job.bc)
+					local body = decompile_via_api(job.bc, apiUrl, timeout)
 					if body and body ~= "" then
 						-- strip null bytes like the normal decompile path does (they break the XML file)
 						ldeccache[job.key] = (string.gsub(body, "\0", "\\0"))
@@ -2055,7 +2063,11 @@ local function report_executor_support(O)
 		missing[#missing + 1] = "getscriptbytecode  ->  script caching disabled"
 	end
 	if not decompile and not O.noscripts then
-		missing[#missing + 1] = "decompile  ->  scripts will not be decompiled"
+		if (request or http_request) and base64encode and getscriptbytecode then
+			print("[saveinstance] No executor decompiler — falling back to the lua.expert API to decompile scripts.")
+		else
+			missing[#missing + 1] = "decompile (no API fallback: needs request/http_request)  ->  scripts will not be decompiled"
+		end
 	end
 	if O.SetStreaming and not sethiddenproperty then
 		missing[#missing + 1] = "sethiddenproperty  ->  SetStreaming can't fully pin streamed content (may be less reliable)"
@@ -2678,6 +2690,8 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		end
 	end
 
+	local used_lua_expert = false -- set true when lua.expert (external API) is the active decompiler; credits it in script headers
+
 	do
 		local Decompiler = decompile --OPTIONS.decomptype == "custom" and custom_decompiler or decompile or custom_decompiler
 
@@ -2751,7 +2765,32 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 				return output
 			end
 		else
-			ldecompile = function()
+			-- No executor decompiler -> fall back to the external API (lua.expert), using ldeccache.
+			-- DecompilePrepass pre-fills the cache in parallel; otherwise each script is decompiled on
+			-- demand here. This is what makes saves on decompiler-less executors (e.g. Volt) work.
+			local canApi = (request or http_request) and base64encode and getscriptbytecode and getbytecode
+			used_lua_expert = canApi and true or false
+			ldecompile = function(script)
+				if getbytecode then
+					local s, bytecode = getbytecode(script)
+					if s and bytecode and bytecode ~= "" then
+						local hashed = sha384(bytecode)
+						local cached = ldeccache and ldeccache[hashed]
+						if cached then
+							return cached
+						end
+						if canApi then
+							local body = decompile_via_api(bytecode, OPTIONS.PrepassApiUrl, OPTIONS.PrepassTimeout)
+							if body and body ~= "" then
+								body = (string.gsub(body, "\0", "\\0")) -- null bytes break the XML file
+								if ldeccache then
+									ldeccache[hashed] = body
+								end
+								return body
+							end
+						end
+					end
+				end
 				return "-- Your Executor does NOT have a Decompiler"
 			end
 		end
@@ -3280,7 +3319,9 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 											end
 										end
 
-										value = "-- Saved by USSI modded by Robloxscripts.com (Join the Discord) discord.robloxscripts.com\n\n"
+										value = "-- Saved by USSI modded by Robloxscripts.com (Join the Discord) discord.robloxscripts.com\n"
+											.. (used_lua_expert and "-- DECOMPILED USING LUA.EXPERT FREE DECOMPILER — Join: https://discord.com/invite/y63m4zUYa4\n" or "")
+											.. "\n"
 											.. (hasLinkedSource and "-- Original Source: https://assetdelivery.roblox.com/v1/asset/?" .. (LinkedSource_type or "id") .. "=" .. (LinkedSource or LinkedSource_Url) .. "\n\n" or "")
 											.. value
 									end
