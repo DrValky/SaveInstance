@@ -33,6 +33,7 @@ synsaveinstance(Options)
 - **Faster, lighter saves** — the file is assembled with a table buffer instead of repeated string concatenation, fixing the `O(n²)` growth that caused "not enough memory" on large games.
 - **Executor capability check** — on each save it prints (console) which required functions your executor is missing (`gethiddenproperty`, `decompile`, `request`, `sethiddenproperty`, …) and the impact, so you know up front why a save might be incomplete.
 - **`UseUGCValidationService`** (default `true`) — set `false` to never use `UGCValidationService` as a hidden-property fallback (some executors flag or lack it); `gethiddenproperty` is still used.
+- **`NeutralizeLighting`** (default `false`) — set `true` to reset `Lighting` (ClockTime/Fog/Ambient), `Atmosphere`, post-effects (ColorCorrection/Bloom/Blur/SunRays/DoF) and clouds to clean midday right before saving, so the place opens **bright** instead of inheriting the game's dark/foggy/night atmosphere (the "all grey on the camera" look). Default keeps the game's real lighting.
 - A progress bar (with ETA) accompanies the on-screen save status.
 - **`Debug = true`** writes a detailed `saveinstance-debug.txt` to your executor workspace (executor, capabilities, options, streaming/prepass/decompile stats, save result) — handy for troubleshooting.
 

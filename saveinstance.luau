@@ -1747,7 +1747,8 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 --- @field StreamingSlices number -- * Vertical layers swept per grid cell; raise for tall maps. ___Default:___ 2
 --- @field StreamingMaxTime number|boolean -- * Overall seconds cap for the streaming sweep. It gives up on stuck/empty chunks (common on ocean-heavy maps where `RequestStreamAroundAsync` hangs) and proceeds. `false` = auto-scale to the grid size (bigger maps get a longer cap, 60s–15m). Set a number to force it. ___Default:___ false (auto)
 --- @field StreamingChunkWait number -- * Max seconds to wait for one chunk to finish loading. The sweep waits until a region stops gaining parts (stability detection), capped here — dense regions load fully, empty ones return fast. ___Default:___ 12
---- @field StreamingSettleTime number -- * Seconds to wait after the streaming sweep for in-flight background loads to finish before saving. ___Default:___ 3
+--- @field StreamingSettleTime number -- * Seconds to wait after the streaming sweep for in-flight background terrain/loads to finish before saving. Also caps the post-sweep terrain-stabilization poll (waits until SmoothGrid stops growing) so terrain fills in instead of leaving floating islands. ___Default:___ 5
+--- @field NeutralizeLighting boolean -- * Reset `Lighting` (ClockTime/Fog/Ambient), `Atmosphere`, post-effects (ColorCorrection/Bloom/Blur/SunRays/DoF) and clouds to clean midday right before saving, so the place opens BRIGHT instead of inheriting the game's dark/foggy/night atmosphere (the "all grey on the camera" look). `false` keeps the game's real lighting. ___Default:___ false
 --- @field Debug boolean -- * Writes a detailed run log to `saveinstance-debug.txt` in the executor workspace (executor, capabilities, options, streaming/prepass/decompile stats, save result). Share it for diagnosis. ___Default:___ false
 --- @field DecompilePrepass boolean -- * **RISKY:** Before saving, decompiles every client script in parallel via an external API (`api.lua.expert`) and pre-fills the decompile cache, so the save's decompile step is near-instant. Big speedup on script-heavy games. Sends script bytecode to a third-party API; needs `getscriptbytecode` + an HTTP request function. ___Default:___ false
 --- @field PrepassConcurrency number -- * Parallel decompile requests kept in flight during the prepass. ___Default:___ 24
@@ -2182,6 +2183,68 @@ local function report_executor_support(O)
 	return missing
 end
 
+-- NeutralizeLighting: reset Lighting to clean midday so the saved place opens BRIGHT instead of
+-- inheriting the game's dark/foggy/night atmosphere (the "all grey on the camera" look). Modifies
+-- the live Lighting right before the save captures it. Off by default (keeps faithful lighting).
+local function neutralize_lighting()
+	pcall(function()
+		local L = service.Lighting
+		L.ClockTime = 14
+		L.Brightness = 3
+		L.ExposureCompensation = 0
+		L.EnvironmentDiffuseScale = 1
+		L.EnvironmentSpecularScale = 1
+		L.Ambient = Color3.fromRGB(70, 70, 70)
+		L.OutdoorAmbient = Color3.fromRGB(140, 140, 140)
+		L.ColorShift_Top = Color3.fromRGB(0, 0, 0)
+		L.ColorShift_Bottom = Color3.fromRGB(0, 0, 0)
+		L.FogStart = 0
+		L.FogEnd = 1e6
+		L.FogColor = Color3.fromRGB(192, 192, 192)
+	end)
+	-- Atmosphere (haze/glare) and post-effects (ColorCorrection/Bloom/Blur/SunRays/DoF) are the main
+	-- causes of the grey wash — clear them too.
+	pcall(function()
+		for _, e in ipairs(service.Lighting:GetDescendants()) do
+			if e:IsA("Atmosphere") then
+				e.Density = 0.3
+				e.Haze = 0
+				e.Glare = 0
+			elseif e:IsA("PostEffect") then
+				e.Enabled = false
+			end
+		end
+	end)
+	pcall(function()
+		local clouds = workspace.Terrain:FindFirstChildOfClass("Clouds")
+		if clouds then
+			clouds.Density = 0
+		end
+	end)
+end
+
+-- After the streaming sweep, terrain keeps loading in the background. Poll SmoothGrid's size until it
+-- stops growing (or maxWait) so the re-capture grabs the FULL terrain instead of floating-island gaps.
+local function wait_terrain_loaded(terrainGHP, maxWait)
+	local lastSize, stable = -1, 0
+	local deadline = os.clock() + maxWait
+	while os.clock() < deadline do
+		local ok, grid = pcall(terrainGHP, workspace.Terrain, "SmoothGrid")
+		local sz = (ok and type(grid) == "string") and #grid or 0
+		if sz > 0 and sz == lastSize then
+			stable += 1
+			if stable >= 2 then
+				break
+			end
+		else
+			stable = 0
+		end
+		lastSize = sz
+		task.wait(1)
+	end
+	return lastSize
+end
+
 local function synsaveinstance(CustomOptions, CustomOptions2)
 	if GLOBAL_ENV.USSI then
 		return
@@ -2296,7 +2359,10 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		StreamingSlices = 2, -- vertical layers (raise for tall maps)
 		StreamingMaxTime = false, -- overall seconds cap for the streaming sweep; false = AUTO-scale to the grid size (bigger maps get a longer cap). Set a number to force it.
 		StreamingChunkWait = 12, -- max seconds to wait for ONE chunk to finish loading; the sweep waits until a region stops gaining parts (stability), so it usually returns sooner. Raise for very dense maps.
-		StreamingSettleTime = 3, -- seconds to wait after the sweep for in-flight background loads to finish before saving
+		StreamingSettleTime = 5, -- seconds to wait after the sweep for in-flight background terrain/loads to finish before saving (also caps the post-sweep terrain-stabilization wait)
+
+		-- * NeutralizeLighting: reset Lighting/Atmosphere/post-effects to clean midday so the saved place opens BRIGHT instead of dark/foggy/night (the "all grey on the camera" look). Default false keeps the game's real lighting.
+		NeutralizeLighting = false,
 
 		-- * Decompilation prepass: parallel-decompile all client scripts via an external API before saving (big speedup on script-heavy games). RISKY: sends script bytecode to a third-party API.
 		DecompilePrepass = false,
@@ -4016,6 +4082,12 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			if streamOk and realcheck then
 				local terrainGHP = gethiddenproperty or (getgenv and getgenv().gethiddenpropertygethiddenproperty)
 				if terrainGHP then
+					-- Let background terrain finish loading before reading the grid, so we capture the
+					-- FULL terrain instead of leaving floating-island gaps over water.
+					if StatusText then
+						StatusText.Text = "Waiting for terrain to finish loading..."
+					end
+					wait_terrain_loaded(terrainGHP, math.clamp((tonumber(OPTIONS.StreamingSettleTime) or 5) * 2, 6, 25))
 					local reOk = pcall(function()
 						getfenv().physicsgrid = base64encode(terrainGHP(workspace.Terrain, "PhysicsGrid"))
 						getfenv().smoothgrid = base64encode(terrainGHP(workspace.Terrain, "SmoothGrid"))
@@ -4024,6 +4096,19 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 					dbg("[stream] terrain re-capture ok=", reOk)
 				end
 			end
+			-- Streaming teleports the character around; its final spot can be just under the terrain, and
+			-- Studio opens the place at the saved camera. Lift the camera above the map so it doesn't open
+			-- underground.
+			pcall(function()
+				local cam = workspace.CurrentCamera
+				local plr = service.Players.LocalPlayer
+				local char = plr and plr.Character
+				local root = char and (char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart)
+				local focus = (root and root.Position) or (cam and cam.CFrame.Position) or Vector3.new(0, 0, 0)
+				if cam then
+					cam.CFrame = CFrame.new(focus + Vector3.new(0, 300, 300), focus)
+				end
+			end)
 			if ProgressFill then -- reset the bar for the save phase
 				ProgressFill.Size = UDim2.new(0, 0, 1, 0)
 			end
@@ -4051,6 +4136,11 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			if ProgressFill then -- reset the bar for the save phase
 				ProgressFill.Size = UDim2.new(0, 0, 1, 0)
 			end
+		end
+
+		if OPTIONS.NeutralizeLighting then
+			print("[saveinstance] NeutralizeLighting: resetting Lighting/Atmosphere to clean daylight.")
+			neutralize_lighting()
 		end
 
 		elapse_t = os.clock()
