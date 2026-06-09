@@ -1883,7 +1883,12 @@ local function StreamEntireMap(O, report)
 					end
 					done += 1
 					if report then
-						report(done, total)
+						local elapsed = os.clock() - streamStart
+						local eta -- estimate from the average rate so far, capped by the remaining time budget
+						if done > 0 and elapsed > 0.5 then
+							eta = math.max(0, math.min((total - done) * (elapsed / done), maxTime - elapsed))
+						end
+						report(done, total, eta)
 					end
 				end
 			end)
@@ -2051,6 +2056,7 @@ local function RunDecompilePrepass(ldeccache, O, report)
 	-- Bounded cooperative concurrency (Lua coroutines don't preempt mid-statement, so the
 	-- shared counters are safe without locks).
 	local nextIndex, done, active = 0, 0, math.min(concurrency, total)
+	local prepassStart = os.clock()
 	for _ = 1, active do
 		task.spawn(function()
 			pcall(function() -- guard: a throw here must NOT skip `active -= 1`, or the wait below hangs forever
@@ -2067,7 +2073,12 @@ local function RunDecompilePrepass(ldeccache, O, report)
 					end
 					done += 1
 					if report then
-						report(done, total)
+						local elapsed = os.clock() - prepassStart
+						local eta
+						if done > 0 and elapsed > 0.5 then
+							eta = (total - done) * (elapsed / done)
+						end
+						report(done, total, eta)
 					end
 				end
 			end)
@@ -3896,9 +3907,14 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			if StatusText then
 				StatusText.Text = "Streaming map in (this can take a while)..."
 			end
-			local streamOk, streamReason = StreamEntireMap(OPTIONS, function(streamed, totalChunks)
+			local streamOk, streamReason = StreamEntireMap(OPTIONS, function(streamed, totalChunks, eta)
 				if StatusText then
-					StatusText.Text = string.format("Streaming map: %d / %d chunks", streamed, totalChunks)
+					StatusText.Text = string.format(
+						"Streaming map: %d / %d chunks%s",
+						streamed,
+						totalChunks,
+						eta and string.format(" (~%ds left)", math.ceil(eta)) or ""
+					)
 				end
 				if ProgressFill and totalChunks > 0 then
 					ProgressFill.Size = UDim2.new(streamed / totalChunks, 0, 1, 0)
@@ -3915,9 +3931,14 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			if StatusText then
 				StatusText.Text = "Decompiling scripts (prepass)..."
 			end
-			local prepassOk, prepassReason = RunDecompilePrepass(ldeccache, OPTIONS, function(decompiled, totalScripts)
+			local prepassOk, prepassReason = RunDecompilePrepass(ldeccache, OPTIONS, function(decompiled, totalScripts, eta)
 				if StatusText then
-					StatusText.Text = string.format("Decompile prepass: %d / %d scripts", decompiled, totalScripts)
+					StatusText.Text = string.format(
+						"Decompile prepass: %d / %d scripts%s",
+						decompiled,
+						totalScripts,
+						eta and string.format(" (~%ds left)", math.ceil(eta)) or ""
+					)
 				end
 				if ProgressFill and totalScripts > 0 then
 					ProgressFill.Size = UDim2.new(decompiled / totalScripts, 0, 1, 0)
