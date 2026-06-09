@@ -1746,6 +1746,8 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 --- @field StreamingConcurrency number|boolean -- * How many stream requests are kept in flight at once (higher = faster, more load). `false` = auto-scale to the grid size. ___Default:___ false (auto)
 --- @field StreamingSlices number -- * Vertical layers swept per grid cell; raise for tall maps. ___Default:___ 2
 --- @field StreamingMaxTime number|boolean -- * Overall seconds cap for the streaming sweep. It gives up on stuck/empty chunks (common on ocean-heavy maps where `RequestStreamAroundAsync` hangs) and proceeds. `false` = auto-scale to the grid size (bigger maps get a longer cap, 60s–15m). Set a number to force it. ___Default:___ false (auto)
+--- @field StreamingChunkWait number -- * Max seconds to wait for one chunk to finish loading. The sweep waits until a region stops gaining parts (stability detection), capped here — dense regions load fully, empty ones return fast. ___Default:___ 12
+--- @field StreamingSettleTime number -- * Seconds to wait after the streaming sweep for in-flight background loads to finish before saving. ___Default:___ 3
 --- @field Debug boolean -- * Writes a detailed run log to `saveinstance-debug.txt` in the executor workspace (executor, capabilities, options, streaming/prepass/decompile stats, save result). Share it for diagnosis. ___Default:___ false
 --- @field DecompilePrepass boolean -- * **RISKY:** Before saving, decompiles every client script in parallel via an external API (`api.lua.expert`) and pre-fills the decompile cache, so the save's decompile step is near-instant. Big speedup on script-heavy games. Sends script bytecode to a third-party API; needs `getscriptbytecode` + an HTTP request function. ___Default:___ false
 --- @field PrepassConcurrency number -- * Parallel decompile requests kept in flight during the prepass. ___Default:___ 24
@@ -1784,6 +1786,31 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 	@param Parameter_1 variant<table, table<Instance>> -- Can either be [SynSaveInstance.CustomOptions table] or a filled with instances ({Instance}), (then it will be treated as ExtraInstances with an invalid mode and IsModel will be true).
 	@param Parameter_2 table -- [OPTIONAL] If present, then Parameter_2 will be assumed to be [SynSaveInstance.CustomOptions table]. And then if the Parameter_1 is an Instance, then it will be assumed to be [SynSaveInstance.CustomOptions table].Object. If Parameter_1 is a table filled with instances ({Instance}), then it will be assumed to be [SynSaveInstance.CustomOptions table].ExtraInstances and IsModel will be true). This exists for sake compatibility with `saveinstance(game, {})`
 ]=]
+
+-- Waits until the region around `point` stops gaining parts (i.e. it has finished streaming in), or
+-- until maxWait. More thorough than a fixed wait: dense regions get the time they actually need,
+-- while empty/ocean regions return quickly. Used per chunk so the sweep captures full content.
+local function wait_region_loaded(point, radius, maxWait)
+	local function count()
+		local ok, parts = pcall(workspace.GetPartBoundsInRadius, workspace, point, radius)
+		return (ok and parts) and #parts or 0
+	end
+	local last, stableFor, elapsed = count(), 0, 0
+	local minObserve = 1.5 -- observe at least this long so we don't bail before loading even starts
+	while elapsed < maxWait do
+		task.wait(0.35)
+		elapsed += 0.35
+		local now = count()
+		if now > last then
+			last, stableFor = now, 0
+		else
+			stableFor += 0.35
+		end
+		if elapsed >= minObserve and stableFor >= 1 then -- no new parts for ~1s → region is loaded
+			break
+		end
+	end
+end
 
 -- Force-loads an entire StreamingEnabled map into memory before saving, so saveinstance captures
 -- the whole map instead of only the chunks near the player (inspired by centerepic's Streamer7).
@@ -1872,9 +1899,12 @@ local function StreamEntireMap(O, report)
 	-- small maps finish fast, while big / ocean-heavy maps get more workers and a longer cap so the
 	-- sweep isn't cut off before the real content loads. (Both are still overridable.)
 	local concurrency = math.clamp(tonumber(O.StreamingConcurrency) or (math.floor(total / 40) + 8), 1, 24)
-	local chunkWait = math.min(timeout, 6) -- give up on a chunk after this many seconds (the engine keeps loading it in the background up to `timeout`, so we don't lose it — we just stop blocking on it)
-	-- Auto budget ≈ worst-case time to process every chunk at this concurrency (with margin), capped 60s–15m.
-	local maxTime = tonumber(O.StreamingMaxTime) or math.clamp(math.ceil(total / concurrency) * chunkWait * 1.5, 60, 900)
+	-- MAX seconds to wait for ONE chunk to finish loading. We wait for the region to actually stop
+	-- gaining parts (stability), capped here — so dense regions load fully while empty ones return fast.
+	local chunkWait = math.clamp(tonumber(O.StreamingChunkWait) or 12, 2, math.max(timeout, 30))
+	-- Auto budget ≈ worst case (every chunk hits the cap) at this concurrency, clamped 90s–20m. Stability
+	-- detection finishes most chunks far sooner, so in practice the sweep ends well before this ceiling.
+	local maxTime = tonumber(O.StreamingMaxTime) or math.clamp(math.ceil(total / concurrency) * chunkWait, 90, 1200)
 	local streamStart = os.clock()
 	local nextIndex, done, activeWorkers = 0, 0, concurrency
 	dbg("[stream] grid:", total, "chunks | radius:", radius, "| auto concurrency:", concurrency, "| auto maxTime:", math.floor(maxTime) .. "s")
@@ -1891,21 +1921,15 @@ local function StreamEntireMap(O, report)
 					if not point then
 						return
 					end
-					-- Self-timeout: RequestStreamAroundAsync often hangs PAST its own timeout on edge /
-					-- ocean / empty chunks. Without our own cap the worker (and the whole sweep) stalls
-					-- forever on the last few. Run it in a side thread and move on after `timeout`
-					-- regardless (the engine + character driver still load most of the real content).
-					local finished = false
+					-- Fire the stream request (fire-and-forget); the engine loads the region in the background.
 					task.spawn(function()
 						pcall(function()
 							LocalPlayer:RequestStreamAroundAsync(point, timeout)
 						end)
-						finished = true
 					end)
-					local deadline = os.clock() + chunkWait
-					while not finished and os.clock() < deadline do
-						task.wait(0.1)
-					end
+					-- Wait until the region stops gaining parts (loaded) or chunkWait: dense regions load fully,
+					-- empty/ocean ones return fast. Avoids blocking on the often-hanging RequestStreamAroundAsync.
+					wait_region_loaded(point, radius, chunkWait)
 					done += 1
 					if report then
 						local elapsed = os.clock() - streamStart
@@ -1945,6 +1969,16 @@ local function StreamEntireMap(O, report)
 
 	while activeWorkers > 0 do
 		task.wait(0.1)
+	end
+
+	-- Settle: let any still-in-flight background loads finish before we stop pinning + save.
+	local settleTime = math.clamp(tonumber(O.StreamingSettleTime) or 3, 0, 60)
+	if settleTime > 0 then
+		dbg("[stream] settling", settleTime .. "s for in-flight loads")
+		if report then
+			report(done, total, settleTime)
+		end
+		task.wait(settleTime)
 	end
 
 	pinConn:Disconnect()
@@ -2260,6 +2294,8 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		StreamingConcurrency = false, -- requests in flight at once; false = AUTO-scale to the map/grid size
 		StreamingSlices = 2, -- vertical layers (raise for tall maps)
 		StreamingMaxTime = false, -- overall seconds cap for the streaming sweep; false = AUTO-scale to the grid size (bigger maps get a longer cap). Set a number to force it.
+		StreamingChunkWait = 12, -- max seconds to wait for ONE chunk to finish loading; the sweep waits until a region stops gaining parts (stability), so it usually returns sooner. Raise for very dense maps.
+		StreamingSettleTime = 3, -- seconds to wait after the sweep for in-flight background loads to finish before saving
 
 		-- * Decompilation prepass: parallel-decompile all client scripts via an external API before saving (big speedup on script-heavy games). RISKY: sends script bytecode to a third-party API.
 		DecompilePrepass = false,
@@ -3955,6 +3991,20 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 				end
 			end)
 			print(streamOk and "[saveinstance] Streaming complete." or ("[saveinstance] Streaming skipped: " .. tostring(streamReason)))
+			-- Terrain (SmoothGrid/PhysicsGrid) was captured at LOAD, before streaming — so on a streaming
+			-- map it only had the spawn-area terrain (the "squares of water" with missing land). Re-capture
+			-- it now that the sweep has streamed the rest of the terrain in.
+			if streamOk and realcheck then
+				local terrainGHP = gethiddenproperty or (getgenv and getgenv().gethiddenpropertygethiddenproperty)
+				if terrainGHP then
+					local reOk = pcall(function()
+						getfenv().physicsgrid = base64encode(terrainGHP(workspace.Terrain, "PhysicsGrid"))
+						getfenv().smoothgrid = base64encode(terrainGHP(workspace.Terrain, "SmoothGrid"))
+					end)
+					print("[saveinstance] Terrain " .. (reOk and "re-captured after streaming." or "re-capture failed (keeping load-time copy)."))
+					dbg("[stream] terrain re-capture ok=", reOk)
+				end
+			end
 			if ProgressFill then -- reset the bar for the save phase
 				ProgressFill.Size = UDim2.new(0, 0, 1, 0)
 			end
