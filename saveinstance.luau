@@ -2478,10 +2478,10 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	local IgnoreNotArchivable = not OPTIONS.IgnoreNotArchivable
 	local IgnorePropertiesOfNotScriptsOnScriptsMode = OPTIONS.IgnorePropertiesOfNotScriptsOnScriptsMode
 
+	_api_ok, _api_fail, _api_first_fail, _api_warned = 0, 0, nil, false -- reset decompile counters/warn each run
 	if OPTIONS.Debug then -- start the debug log (written to saveinstance-debug.txt at the end)
 		debug_enabled = true
 		table.clear(debug_log)
-		_api_ok, _api_fail, _api_first_fail = 0, 0, nil
 		debug_clock0 = os.clock()
 		dbg("=== saveinstance debug log ===")
 		dbg("executor:", EXECUTOR_NAME ~= "" and EXECUTOR_NAME or "Unknown", "| client:", CLIENT_VERSION, "| StreamingEnabled:", workspace.StreamingEnabled, "| place:", game.PlaceId)
@@ -4047,6 +4047,14 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			else
 				warn(string.format("[saveinstance] Save FAILED after %.2fs — see the error below", elapsed))
 				warn(err)
+			end
+			if _api_ok > 0 or _api_fail > 0 then -- always show the decompile outcome + first failure reason (no Debug needed)
+				print(string.format(
+					"[saveinstance] Decompile via lua.expert: %d ok, %d failed%s",
+					_api_ok,
+					_api_fail,
+					(_api_fail > 0 and _api_first_fail) and (" | first failure: " .. tostring(_api_first_fail)) or ""
+				))
 			end
 			if debug_enabled then -- finish + write the debug log
 				dbg("[save] ok=", ok, "| size=", get_size_format(), "| time=", string.format("%.2fs", elapsed))
