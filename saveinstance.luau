@@ -1729,7 +1729,7 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 --- @field StreamingMaxTime number -- * Overall seconds cap for the streaming sweep. It gives up on stuck/empty chunks (common on ocean-heavy maps where `RequestStreamAroundAsync` hangs) and proceeds. Raise for more thorough loading on huge maps. ___Default:___ 120
 --- @field DecompilePrepass boolean -- * **RISKY:** Before saving, decompiles every client script in parallel via an external API (`api.lua.expert`) and pre-fills the decompile cache, so the save's decompile step is near-instant. Big speedup on script-heavy games. Sends script bytecode to a third-party API; needs `getscriptbytecode` + an HTTP request function. ___Default:___ false
 --- @field PrepassConcurrency number -- * Parallel decompile requests kept in flight during the prepass. ___Default:___ 24
---- @field PrepassTimeout number -- * Seconds to wait per prepass decompile request. ___Default:___ 20
+--- @field PrepassRateGap number -- * Minimum seconds between decompile-API requests (lua.expert rejects unthrottled bursts). Lower = faster if the API allows. ___Default:___ 0.12
 --- @field PrepassApiUrl string -- * Endpoint used by the decompile prepass. ___Default:___ "https://api.lua.expert/decompile"
 
 --- @interface OptionsAliases
@@ -1940,6 +1940,7 @@ end
 -- every request by at least `min_gap` seconds. Shared across the parallel prepass AND on-demand
 -- calls via the module-level slot. (This is the fix for "decompiler didn't work".)
 local _api_next_slot = 0
+local _api_warned = false -- so we log the first lua.expert failure once (with the reason) instead of spamming
 local function acquire_api_slot(min_gap)
 	min_gap = min_gap or 0.12
 	local now = os.clock()
@@ -1952,42 +1953,29 @@ end
 
 -- Decompiles bytecode via an external HTTP API (default lua.expert). Returns the source, or nil.
 -- Shared by DecompilePrepass and by the auto-fallback decompiler (executors without their own).
-local function decompile_via_api(bc, apiUrl, timeout, min_gap)
+local function decompile_via_api(bc, apiUrl, min_gap)
 	local HttpRequest = request or http_request
 	if not (HttpRequest and base64encode) then
 		return nil
 	end
 	apiUrl = apiUrl or "https://api.lua.expert/decompile"
-	timeout = timeout or 20
-	acquire_api_slot(min_gap) -- throttle BEFORE dispatching, so concurrent callers space out
-	local HttpService = service.HttpService
-	local settled, payload = false, nil
-	task.spawn(function()
-		local ok, res = pcall(function() -- encode INSIDE the pcall so a JSON/base64 error can't kill this
-			return HttpRequest({
-				Url = apiUrl,
-				Method = "POST",
-				Headers = { ["content-type"] = "application/json" },
-				Body = HttpService:JSONEncode({ script = base64encode(bc) }),
-			})
-		end)
-		if not settled then
-			settled, payload = true, { ok = ok, res = res }
+	acquire_api_slot(min_gap) -- throttle so the API doesn't reject the burst
+	-- Call request DIRECTLY (NOT inside task.spawn). Some executors' `request` misbehaves when called
+	-- from a spawned thread; calling it directly matches the known-working reference. request has its
+	-- own internal HTTP timeout, so we don't add one.
+	local ok, res = pcall(HttpRequest, {
+		Url = apiUrl,
+		Method = "POST",
+		Headers = { ["content-type"] = "application/json" },
+		Body = service.HttpService:JSONEncode({ script = base64encode(bc) }),
+	})
+	if not ok or type(res) ~= "table" or res.StatusCode ~= 200 then
+		if not _api_warned then -- log the FIRST failure (status/body) so the reason is visible, without spamming
+			_api_warned = true
+			local detail = ok and ("HTTP " .. tostring(res and res.StatusCode) .. " — " .. tostring(res and res.Body))
+				or ("error: " .. tostring(res))
+			warn("[saveinstance] lua.expert decompile request failed (" .. detail .. ")")
 		end
-	end)
-	local deadline = os.clock() + timeout
-	while not settled and os.clock() < deadline do
-		task.wait(0.05)
-	end
-	if not settled then
-		settled = true
-		return nil
-	end
-	if not payload.ok then
-		return nil
-	end
-	local res = payload.res
-	if not res or res.StatusCode ~= 200 then
 		return nil
 	end
 	return res.Body
@@ -2001,7 +1989,6 @@ local function RunDecompilePrepass(ldeccache, O, report)
 
 	local apiUrl = O.PrepassApiUrl or "https://api.lua.expert/decompile"
 	local concurrency = math.max(1, tonumber(O.PrepassConcurrency) or 24)
-	local timeout = tonumber(O.PrepassTimeout) or 20
 	local rateGap = tonumber(O.PrepassRateGap) or 0.12
 
 	-- Gather unique client scripts (skip server scripts we can't read; dedupe by bytecode hash)
@@ -2066,7 +2053,7 @@ local function RunDecompilePrepass(ldeccache, O, report)
 					if not job then
 						return
 					end
-					local body = decompile_via_api(job.bc, apiUrl, timeout, rateGap)
+					local body = decompile_via_api(job.bc, apiUrl, rateGap)
 					if body and body ~= "" then
 						-- strip null bytes like the normal decompile path does (they break the XML file)
 						ldeccache[job.key] = (string.gsub(body, "\0", "\\0"))
@@ -2240,7 +2227,6 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		-- * Decompilation prepass: parallel-decompile all client scripts via an external API before saving (big speedup on script-heavy games). RISKY: sends script bytecode to a third-party API.
 		DecompilePrepass = false,
 		PrepassConcurrency = 24, -- parallel decompile requests kept in flight
-		PrepassTimeout = 20, -- seconds per decompile request
 		PrepassRateGap = 0.12, -- min seconds between API requests (lua.expert rejects unthrottled bursts). Lower = faster if the API allows.
 		PrepassApiUrl = "https://api.lua.expert/decompile",
 
@@ -2823,7 +2809,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 							return cached
 						end
 						if canApi then
-							local body = decompile_via_api(bytecode, OPTIONS.PrepassApiUrl, OPTIONS.PrepassTimeout, OPTIONS.PrepassRateGap)
+							local body = decompile_via_api(bytecode, OPTIONS.PrepassApiUrl, OPTIONS.PrepassRateGap)
 							if body and body ~= "" then
 								body = (string.gsub(body, "\0", "\\0")) -- null bytes break the XML file
 								if ldeccache then
