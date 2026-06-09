@@ -2100,6 +2100,7 @@ local function RunDecompilePrepass(ldeccache, O, report)
 	end
 
 	local total = #jobs
+	print("[saveinstance] Prepass: gathered " .. total .. " unique client scripts to decompile")
 	if total == 0 then
 		return true
 	end
@@ -2883,9 +2884,27 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			-- demand here. This is what makes saves on decompiler-less executors (e.g. Volt) work.
 			local canApi = (request or http_request) and base64encode and getscriptbytecode and getbytecode
 			used_lua_expert = canApi and true or false
+			print(string.format(
+				"[saveinstance] lua.expert decompiler setup: canApi=%s (request=%s base64encode=%s getscriptbytecode=%s getbytecode=%s)",
+				tostring(not not canApi),
+				tostring((request or http_request) ~= nil),
+				tostring(base64encode ~= nil),
+				tostring(getscriptbytecode ~= nil),
+				tostring(getbytecode ~= nil)
+			))
+			local diagDone = false
 			ldecompile = function(script)
 				if getbytecode then
 					local s, bytecode = getbytecode(script)
+					if not diagDone then -- one-time diagnostic: shows why scripts may not be decompiling
+						diagDone = true
+						print(string.format(
+							"[saveinstance] first on-demand decompile: getbytecode ok=%s, bytecode=%s bytes, canApi=%s",
+							tostring(s),
+							tostring(bytecode and #bytecode or -1),
+							tostring(not not canApi)
+						))
+					end
 					if s and bytecode and bytecode ~= "" then
 						local hashed = sha384(bytecode)
 						local cached = ldeccache and ldeccache[hashed]
