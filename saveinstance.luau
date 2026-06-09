@@ -1726,6 +1726,7 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 --- @field StreamingTimeout number -- * Seconds to wait per `RequestStreamAroundAsync` request. ___Default:___ 20
 --- @field StreamingConcurrency number -- * How many stream requests are kept in flight at once (higher = faster, more load). ___Default:___ 8
 --- @field StreamingSlices number -- * Vertical layers swept per grid cell; raise for tall maps. ___Default:___ 2
+--- @field StreamingMaxTime number -- * Overall seconds cap for the streaming sweep. It gives up on stuck/empty chunks (common on ocean-heavy maps where `RequestStreamAroundAsync` hangs) and proceeds. Raise for more thorough loading on huge maps. ___Default:___ 120
 --- @field DecompilePrepass boolean -- * **RISKY:** Before saving, decompiles every client script in parallel via an external API (`api.lua.expert`) and pre-fills the decompile cache, so the save's decompile step is near-instant. Big speedup on script-heavy games. Sends script bytecode to a third-party API; needs `getscriptbytecode` + an HTTP request function. ___Default:___ false
 --- @field PrepassConcurrency number -- * Parallel decompile requests kept in flight during the prepass. ___Default:___ 24
 --- @field PrepassTimeout number -- * Seconds to wait per prepass decompile request. ___Default:___ 20
@@ -1848,24 +1849,37 @@ local function StreamEntireMap(O, report)
 	-- until its region is loaded). Lua coroutines don't preempt mid-statement, so the shared
 	-- counters below are safe without locks.
 	local concurrency = math.clamp(tonumber(O.StreamingConcurrency) or 8, 1, total)
+	local chunkWait = math.min(timeout, 6) -- give up on a chunk after this many seconds (the engine keeps loading it in the background up to `timeout`, so we don't lose it — we just stop blocking on it)
+	local maxTime = tonumber(O.StreamingMaxTime) or 120 -- overall cap so the sweep can't drag forever on a mostly-empty/ocean grid (most real content is loaded well before this)
+	local streamStart = os.clock()
 	local nextIndex, done, activeWorkers = 0, 0, concurrency
 
 	for _ = 1, concurrency do
 		task.spawn(function()
 			pcall(function() -- guard: a throw here must NOT skip `activeWorkers -= 1`, or the wait below hangs forever
 				while true do
+					if os.clock() - streamStart > maxTime then
+						return -- overall streaming time budget reached; proceed with whatever loaded
+					end
 					nextIndex += 1
 					local point = points[nextIndex]
 					if not point then
 						return
 					end
-					local ok = pcall(function()
-						LocalPlayer:RequestStreamAroundAsync(point, timeout)
-					end)
-					if not ok then -- one quick retry on failure
+					-- Self-timeout: RequestStreamAroundAsync often hangs PAST its own timeout on edge /
+					-- ocean / empty chunks. Without our own cap the worker (and the whole sweep) stalls
+					-- forever on the last few. Run it in a side thread and move on after `timeout`
+					-- regardless (the engine + character driver still load most of the real content).
+					local finished = false
+					task.spawn(function()
 						pcall(function()
 							LocalPlayer:RequestStreamAroundAsync(point, timeout)
 						end)
+						finished = true
+					end)
+					local deadline = os.clock() + chunkWait
+					while not finished and os.clock() < deadline do
+						task.wait(0.1)
 					end
 					done += 1
 					if report then
@@ -2210,6 +2224,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		StreamingTimeout = 20, -- seconds per RequestStreamAroundAsync request
 		StreamingConcurrency = 8, -- how many stream requests are kept in flight at once
 		StreamingSlices = 2, -- vertical layers (raise for tall maps)
+		StreamingMaxTime = 120, -- overall seconds cap for the streaming sweep (it gives up on stuck/empty chunks and proceeds; raise for more thorough loading on huge maps)
 
 		-- * Decompilation prepass: parallel-decompile all client scripts via an external API before saving (big speedup on script-heavy games). RISKY: sends script bytecode to a third-party API.
 		DecompilePrepass = false,
