@@ -20,11 +20,11 @@ local Params = {
 local synsaveinstance = loadstring(game:HttpGet(Params.RepoURL .. Params.SSI .. ".luau", true), Params.SSI)()
 
 synsaveinstance({
-    -- Everything is optional and OFF by default; uncomment the ones you want:
-    -- SetStreaming = true,       -- force-load an entire StreamingEnabled map before saving
-    -- NeutralizeLighting = true, -- open the saved place in clean daylight, not the game's dark/foggy lighting
-    -- ExportObj = true,          -- also bake all MeshPart geometry to a .obj (recovers private meshes)
-    -- DecompilePrepass = true,   -- decompile all scripts in parallel before saving (script-heavy games)
+    -- all optional, all default false — flip to true to enable:
+    SetStreaming = false,       -- force-load an entire StreamingEnabled map before saving
+    DecompilePrepass = false,   -- decompile all scripts in parallel before saving (script-heavy games)
+    NeutralizeLighting = false, -- open the saved place in clean daylight, not the game's dark/foggy lighting
+    ExportObj = false,          -- also bake all MeshPart geometry to a .obj (recovers private meshes)
 })
 ```
 
