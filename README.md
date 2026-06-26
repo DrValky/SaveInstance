@@ -14,9 +14,10 @@ local synsaveinstance = loadstring(game:HttpGet(Params.RepoURL .. Params.SSI .. 
 
 local Options = {
     safemode = false,
-    SetStreaming = true,     -- force-load the entire StreamingEnabled map first (whole map, not just nearby chunks)
-    DecompilePrepass = true, -- decompile all scripts in parallel before saving (big speedup on script-heavy games)
-    -- Full option list: https://luau.github.io/UniversalSynSaveInstance/api/SynSaveInstance
+    -- Optional features (all OFF by default) — uncomment the ones you want:
+    -- SetStreaming = true,     -- force-load the entire StreamingEnabled map first (whole map, not just nearby chunks)
+    -- DecompilePrepass = true, -- decompile all scripts in parallel before saving (big speedup on script-heavy games)
+    -- Full option list: https://realslimshady2000.github.io/SaveInstanceMODIFIEDFullUnionSupport/api/SynSaveInstance
 }
 
 synsaveinstance(Options)
