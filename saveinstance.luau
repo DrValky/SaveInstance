@@ -908,6 +908,14 @@ XML_Descriptors = {
 			.. "</Ref>" -- TODO Not sure, run tests
 	end,
 	ContentId = function(raw)
+		-- On newer clients, Content-typed props (Image, Texture, SoundId, MeshContent, ...) may read as
+		-- a Content userdata instead of a string. Extract its URI so they still serialize.
+		if type(raw) ~= "string" then
+			local ok, uri = pcall(function()
+				return (raw.SourceType == Enum.ContentSourceType.Uri) and raw.Uri or ""
+			end)
+			raw = (ok and uri) or ""
+		end
 		return raw == "" and "<null></null>" or "<url>" .. XML_Descriptors.string(raw) .. "</url>", "Content" -- TODO Remove "Content" str once Roblox fully releases Content DataType
 	end,
 	CoordinateFrame = function(raw)
@@ -1617,9 +1625,9 @@ do
 							local ValueType = Member.ValueType
 							local ValueType_Name = ValueType.Name
 
-							if 645 <= CLIENT_VERSION and ValueType_Name == "Content" then -- TODO: Remove after Roblox adds a descriptor for it
-								continue
-							end
+							-- (Content-typed props such as Image/Texture/SoundId/MeshContent are serialized via the
+							-- ContentId descriptor, which now handles both string and Content-userdata values. The old
+							-- blanket skip here dropped every one of them on modern clients, blanking decals/images.)
 
 							local Special, PreferredDescriptorName
 
