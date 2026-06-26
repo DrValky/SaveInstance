@@ -1489,14 +1489,15 @@ do
 		local ok, err = pcall(function()
 			local CLIENT_VERSION_str = tostring(CLIENT_VERSION)
 			local ok, result = pcall(readfile, CLIENT_VERSION_str)
-			if
-				ok
-				and result
-				and result ~= ""
-				and pcall(service.HttpService.JSONDecode, service.HttpService, result)
-			then
-				API_Dump = result
-				return
+			-- A real API dump is megabytes and decodes to a big array of classes. The old check only
+			-- verified "decodes as JSON", so a truncated/garbage cache (e.g. a stray 7-byte "4102507")
+			-- passed and was used as the dump — silently breaking every save. Require real substance.
+			if ok and result and #result > 50000 then
+				local decOk, decoded = pcall(service.HttpService.JSONDecode, service.HttpService, result)
+				if decOk and type(decoded) == "table" and #decoded > 100 then
+					API_Dump = result
+					return
+				end
 			end
 
 			local matching_versions, is_matched = {}
@@ -1543,16 +1544,30 @@ do
 		end)
 
 		if not ok or not API_Dump then
-			-- ? Version-specific dump unavailable (common on some executors / CDN); silently fall back to the latest dump below.
-			-- ? A genuine total failure is still reported by "Failed to load the API Dump" further down.
-			API_Dump = service.HttpService:JSONEncode(
-				service.HttpService:JSONDecode(
-					game:HttpGet(
-						"https://raw.githubusercontent.com/MaximumADHD/Roblox-Client-Tracker/roblox/Mini-API-Dump.json",
-						true
-					)
-				).Classes
-			)
+			-- ? Version-specific dump unavailable (common on some executors / CDN). Fall back to the LATEST
+			-- ? OFFICIAL Full-API-Dump from Roblox's own CDN.
+			-- ? CRITICAL: do NOT fall back to MaximumADHD's GitHub dump here — it STRIPS the Hidden/
+			-- ? NotScriptable serialized members (Color3uint8, size, ...), so every BasePart loses its Color
+			-- ? and Size and loads grey & default-sized in Studio. The official CDN dump keeps them.
+			local fb_ok = pcall(function()
+				local ver = (game:HttpGet("https://setup.rbxcdn.com/versionQTStudio", true)):gsub("%s+", "")
+				API_Dump = service.HttpService:JSONEncode(
+					service.HttpService:JSONDecode(
+						game:HttpGet("https://setup.rbxcdn.com/" .. ver .. "-Full-API-Dump.json", true)
+					).Classes
+				)
+			end)
+			if not fb_ok or not API_Dump then
+				-- ? Last resort only (parts may lose Color/Size): MaximumADHD's trimmed dump.
+				API_Dump = service.HttpService:JSONEncode(
+					service.HttpService:JSONDecode(
+						game:HttpGet(
+							"https://raw.githubusercontent.com/MaximumADHD/Roblox-Client-Tracker/roblox/Mini-API-Dump.json",
+							true
+						)
+					).Classes
+				)
+			end
 		end
 
 		local classList = {}
