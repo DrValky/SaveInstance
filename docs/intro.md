@@ -13,7 +13,7 @@ A modified build of **UniversalSynSaveInstance (USSI)** that correctly saves
 
 ```lua
 local Params = {
-    RepoURL = "https://raw.githubusercontent.com/RealSlimShady2000/SaveInstanceMODIFIEDFullUnionSupport/main/",
+    RepoURL = "https://raw.githubusercontent.com/RealSlimShady2000/SaveInstance420Edition/main/",
     SSI = "saveinstance",
 }
 

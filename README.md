@@ -6,7 +6,7 @@ A modified build of [UniversalSynSaveInstance (USSI)](https://github.com/luau/Un
 
 ```lua
 local Params = {
-    RepoURL = "https://raw.githubusercontent.com/RealSlimShady2000/SaveInstanceMODIFIEDFullUnionSupport/main/",
+    RepoURL = "https://raw.githubusercontent.com/RealSlimShady2000/SaveInstance420Edition/main/",
     SSI = "saveinstance",
 }
 
@@ -16,7 +16,7 @@ local Options = {
     safemode = false,
     SetStreaming = false,     -- set true to force-load the entire StreamingEnabled map first (whole map, not just nearby chunks)
     DecompilePrepass = false, -- set true to decompile all scripts in parallel before saving (big speedup on script-heavy games)
-    -- Full option list: https://realslimshady2000.github.io/SaveInstanceMODIFIEDFullUnionSupport/api/SynSaveInstance
+    -- Full option list: https://realslimshady2000.github.io/SaveInstance420Edition/api/SynSaveInstance
 }
 
 synsaveinstance(Options)

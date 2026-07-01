@@ -1,19 +1,19 @@
 title = "SaveInstance (Modified)"
-gitRepoUrl = "https://github.com/RealSlimShady2000/SaveInstanceMODIFIEDFullUnionSupport"
+gitRepoUrl = "https://github.com/RealSlimShady2000/SaveInstance420Edition"
 changelog = false
 
 [docusaurus]
-projectName = "SaveInstanceMODIFIEDFullUnionSupport"
+projectName = "SaveInstance420Edition"
 title = "SaveInstance Modified"
 tagline = "Full Union, Terrain, Streaming, Mesh-Recovery & Decompile support — modded by Robloxscripts.com"
 url = "https://realslimshady2000.github.io"
-baseUrl = "/SaveInstanceMODIFIEDFullUnionSupport/"
+baseUrl = "/SaveInstance420Edition/"
 
 [home]
 enabled = true
 includeReadme = true
 
 [[navbar.items]]
-href = "https://github.com/RealSlimShady2000/SaveInstanceMODIFIEDFullUnionSupport"
+href = "https://github.com/RealSlimShady2000/SaveInstance420Edition"
 label = "GitHub"
 position = "right"
