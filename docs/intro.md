@@ -28,7 +28,7 @@ synsaveinstance({
 })
 ```
 
-See the **[SynSaveInstance API](../api/SynSaveInstance)** for the full option list.
+See the **[Options Reference](./options)** for a clean, grouped breakdown of every option (or the raw [SynSaveInstance API](../api/SynSaveInstance)).
 
 ## What's different from normal SaveInstance
 

@@ -4,6 +4,8 @@
 --!optimize 2
 --!divine-intellect
 -- discord.robloxscripts.com
+-- SaveInstance 420 Edition | https://github.com/RealSlimShady2000/SaveInstance420Edition
+-- Docs: https://realslimshady2000.github.io/SaveInstance420Edition/
 
 local realcheck = true
 local imagonnaaddmorecheck, _ = pcall(function()
@@ -1799,7 +1801,7 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 	Saves instances with specified options. Example:
 	```lua
 	local Params = {
-		RepoURL = "https://raw.githubusercontent.com/luau/SynSaveInstance/main/",
+		RepoURL = "https://raw.githubusercontent.com/RealSlimShady2000/SaveInstance420Edition/main/",
 		SSI = "saveinstance",
 	}
 
