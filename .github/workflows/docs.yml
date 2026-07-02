@@ -10,9 +10,11 @@ permissions:
   pages: write
   id-token: write
 
+# Serialize Pages deploys: allow one at a time and let in-progress deploys FINISH (cancelling a
+# deploy mid-flight jams the Pages queue in "deployment_queued" and the next one times out).
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   build:
