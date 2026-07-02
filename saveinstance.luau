@@ -2109,18 +2109,13 @@ local function RunDecompilePrepass(ldeccache, O, report)
 				return -- server scripts cannot be decompiled client-side
 			end
 		end
-		local ok, bc = pcall(getscriptbytecode, o)
-		if ok and type(bc) == "string" and bc ~= "" then
-			local key = sha384(bc)
-			if not seen[key] and ldeccache[key] == nil then
-				seen[key] = true
-				-- Store the SCRIPT REFERENCE, not the bytecode. Holding every script's bytecode in the
-				-- jobs list at once is what OOM-crashed huge games; workers re-read bytecode on demand.
-				jobs[#jobs + 1] = { key = key, script = o }
-				if maxScripts > 0 and #jobs > maxScripts then
-					overCap = true
-				end
-			end
+		-- Collect the script REFERENCE only. Do NOT call getscriptbytecode here: doing it for
+		-- thousands of scripts during the gather is what crashed huge games (Grow a Garden 2).
+		-- Bytecode read + hash + dedup all happen in the rate-limited workers below, so
+		-- getscriptbytecode is throttled/spread out instead of bursting up front.
+		jobs[#jobs + 1] = o
+		if maxScripts > 0 and #jobs > maxScripts then
+			overCap = true
 		end
 	end
 
@@ -2152,12 +2147,12 @@ local function RunDecompilePrepass(ldeccache, O, report)
 	local total = #jobs
 	if overCap then
 		print(string.format(
-			"[saveinstance] Prepass SKIPPED — this game has more than %d unique client scripts, too many to safely pre-decompile in parallel (risks an out-of-memory crash). Scripts will still decompile on-demand during the save. Raise PrepassMaxScripts to override, or use noscripts = true for a structure-only save.",
+			"[saveinstance] Prepass SKIPPED — this game has more than %d client scripts, too many to safely pre-decompile in parallel (risks an out-of-memory crash). Scripts will still decompile on-demand during the save. Raise PrepassMaxScripts to override, or use noscripts = true for a structure-only save.",
 			maxScripts
 		))
 		return false, "too many scripts (> " .. maxScripts .. "); using on-demand decompile instead"
 	end
-	print("[saveinstance] Prepass: gathered " .. total .. " unique client scripts to decompile")
+	print("[saveinstance] Prepass: gathered " .. total .. " client scripts to decompile")
 	if total == 0 then
 		return true
 	end
@@ -2171,16 +2166,22 @@ local function RunDecompilePrepass(ldeccache, O, report)
 			pcall(function() -- guard: a throw here must NOT skip `active -= 1`, or the wait below hangs forever
 				while true do
 					nextIndex += 1
-					local job = jobs[nextIndex]
-					if not job then
+					local scr = jobs[nextIndex]
+					if not scr then
 						return
 					end
-					-- re-read bytecode here (jobs hold only the script ref, to keep memory low)
-					local okBc, jbc = pcall(getscriptbytecode, job.script)
-					local body = (okBc and type(jbc) == "string" and jbc ~= "") and decompile_via_api(jbc, apiUrl, rateGap) or nil
-					if body and body ~= "" then
-						-- strip null bytes like the normal decompile path does (they break the XML file)
-						ldeccache[job.key] = (string.gsub(body, "\0", "\\0"))
+					-- bytecode + hash + dedup happen HERE (deferred from the gather so getscriptbytecode is
+					-- not called for thousands of scripts up front). The API rate gate throttles the pipeline.
+					local okBc, bc = pcall(getscriptbytecode, scr)
+					if okBc and type(bc) == "string" and bc ~= "" then
+						local key = sha384(bc)
+						if not seen[key] and ldeccache[key] == nil then
+							seen[key] = true
+							local body = decompile_via_api(bc, apiUrl, rateGap)
+							if body and body ~= "" then
+								ldeccache[key] = (string.gsub(body, "\0", "\\0"))
+							end
+						end
 					end
 					done += 1
 					if report then
