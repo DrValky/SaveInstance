@@ -2109,13 +2109,19 @@ local function RunDecompilePrepass(ldeccache, O, report)
 				return -- server scripts cannot be decompiled client-side
 			end
 		end
-		-- Collect the script REFERENCE only. Do NOT call getscriptbytecode here: doing it for
-		-- thousands of scripts during the gather is what crashed huge games (Grow a Garden 2).
-		-- Bytecode read + hash + dedup all happen in the rate-limited workers below, so
-		-- getscriptbytecode is throttled/spread out instead of bursting up front.
-		jobs[#jobs + 1] = o
-		if maxScripts > 0 and #jobs > maxScripts then
-			overCap = true
+				-- getscriptbytecode + dedup HERE, serially on the main thread - exactly like the proven
+		-- upstream ussiprepass. We keep only UNIQUE bytecode; running getscriptbytecode serially
+		-- (NOT concurrently in the workers) is what keeps huge games (Grow a Garden 2) stable.
+		local ok, bc = pcall(getscriptbytecode, o)
+		if ok and type(bc) == "string" and bc ~= "" and not seen[bc] then
+			seen[bc] = true
+			local key = sha384(bc)
+			if ldeccache[key] == nil then
+				jobs[#jobs + 1] = { bc = bc, key = key }
+				if maxScripts > 0 and #jobs > maxScripts then
+					overCap = true
+				end
+			end
 		end
 	end
 
@@ -2147,12 +2153,12 @@ local function RunDecompilePrepass(ldeccache, O, report)
 	local total = #jobs
 	if overCap then
 		print(string.format(
-			"[saveinstance] Prepass SKIPPED — this game has more than %d client scripts; pre-decompiling that many via the rate-limited API would take too long. Scripts will still decompile on-demand during the save. Raise PrepassMaxScripts to force it, or use noscripts = true for a structure-only save.",
+			"[saveinstance] Prepass SKIPPED — this game has more than %d unique client scripts; pre-decompiling that many via the rate-limited API would take too long. Scripts will still decompile on-demand during the save. Raise PrepassMaxScripts to force it, or use noscripts = true for a structure-only save.",
 			maxScripts
 		))
 		return false, "too many scripts (> " .. maxScripts .. "); using on-demand decompile instead"
 	end
-	print("[saveinstance] Prepass: gathered " .. total .. " client scripts to decompile")
+	print("[saveinstance] Prepass: gathered " .. total .. " unique client scripts to decompile")
 	if total == 0 then
 		return true
 	end
@@ -2161,28 +2167,20 @@ local function RunDecompilePrepass(ldeccache, O, report)
 	-- shared counters are safe without locks).
 	local nextIndex, done, active = 0, 0, math.min(concurrency, total)
 	local prepassStart = os.clock()
-		local last_worker_yield = os.clock()
 	for _ = 1, active do
 		task.spawn(function()
 			pcall(function() -- guard: a throw here must NOT skip `active -= 1`, or the wait below hangs forever
 				while true do
 					nextIndex += 1
-					local scr = jobs[nextIndex]
-					if not scr then
+					local job = jobs[nextIndex]
+					if not job then
 						return
 					end
-					-- bytecode + hash + dedup happen HERE (deferred from the gather so getscriptbytecode is
-					-- not called for thousands of scripts up front). The API rate gate throttles the pipeline.
-					local okBc, bc = pcall(getscriptbytecode, scr)
-					if okBc and type(bc) == "string" and bc ~= "" then
-						local key = sha384(bc)
-						if not seen[key] and ldeccache[key] == nil then
-							seen[key] = true
-							local body = decompile_via_api(bc, apiUrl, rateGap)
-							if body and body ~= "" then
-								ldeccache[key] = (string.gsub(body, "\0", "\\0"))
-							end
-						end
+					-- Workers ONLY do the HTTP decompile (getscriptbytecode + dedup already happened serially
+					-- in the gather). No concurrent getscriptbytecode = stable on huge games.
+					local body = decompile_via_api(job.bc, apiUrl, rateGap)
+					if body and body ~= "" then
+						ldeccache[job.key] = (string.gsub(body, "\0", "\\0"))
 					end
 					done += 1
 					if report then
@@ -2193,12 +2191,6 @@ local function RunDecompilePrepass(ldeccache, O, report)
 						end
 						report(done, total, eta)
 					end
-						-- Throttle: reading thousands of scripts' bytecode in a burst crashes huge games. Yielding
-						-- ~every 20ms lets GC keep up (same cadence the working on-demand path uses).
-						if os.clock() - last_worker_yield > 0.02 then
-							last_worker_yield = os.clock()
-							task.wait()
-						end
 				end
 			end)
 			active -= 1
