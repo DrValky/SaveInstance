@@ -1783,6 +1783,7 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 --- @field PrepassConcurrency number -- * Parallel decompile requests kept in flight during the prepass. ___Default:___ 24
 --- @field PrepassRateGap number -- * Minimum seconds between decompile-API requests (lua.expert rejects unthrottled bursts). Lower = faster if the API allows. ___Default:___ 0.12
 --- @field PrepassApiUrl string -- * Endpoint used by the decompile prepass. ___Default:___ "https://api.lua.expert/decompile"
+--- @field PrepassMaxScripts number -- * Safety cap for `DecompilePrepass`. If the game has more than this many **unique client scripts**, the prepass is SKIPPED (pre-decompiling that many at once can out-of-memory crash the client — as on huge games like Grow a Garden 2); scripts then decompile on-demand during the save instead. Raise it if your machine can handle more. ___Default:___ 2500
 
 --- @interface OptionsAliases
 --- @within SynSaveInstance
@@ -2090,7 +2091,11 @@ local function RunDecompilePrepass(ldeccache, O, report)
 	local rateGap = tonumber(O.PrepassRateGap) or 0.12
 
 	-- Gather unique client scripts (skip server scripts we can't read; dedupe by bytecode hash)
-	local seen, jobs = {}, {}
+	-- Safety cap: pre-decompiling every script in a HUGE game (e.g. Grow a Garden 2) OOM-crashes the
+	-- client. If there are more than this many unique scripts, skip the prepass and let them decompile
+	-- on-demand during the save (incremental, far lighter). Raise PrepassMaxScripts to override.
+	local maxScripts = math.max(0, tonumber(O.PrepassMaxScripts) or 2500)
+	local seen, jobs, overCap = {}, {}, false
 	local function consider(o)
 		local okIsA, isLSC = pcall(function()
 			return o:IsA("LuaSourceContainer")
@@ -2109,7 +2114,12 @@ local function RunDecompilePrepass(ldeccache, O, report)
 			local key = sha384(bc)
 			if not seen[key] and ldeccache[key] == nil then
 				seen[key] = true
-				jobs[#jobs + 1] = { key = key, bc = bc }
+				-- Store the SCRIPT REFERENCE, not the bytecode. Holding every script's bytecode in the
+				-- jobs list at once is what OOM-crashed huge games; workers re-read bytecode on demand.
+				jobs[#jobs + 1] = { key = key, script = o }
+				if maxScripts > 0 and #jobs > maxScripts then
+					overCap = true
+				end
 			end
 		end
 	end
@@ -2117,23 +2127,36 @@ local function RunDecompilePrepass(ldeccache, O, report)
 	do
 		local scanned = 0
 		for _, o in game:GetDescendants() do
+			if overCap then
+				break
+			end
 			pcall(consider, o)
 			scanned += 1
-			if scanned % 1000 == 0 then
+			if scanned % 500 == 0 then
 				task.wait() -- yield; getscriptbytecode per script is heavy on big games
 			end
 		end
 	end
-	if getloadedmodules then
+	if not overCap and getloadedmodules then
 		local ok, mods = pcall(getloadedmodules)
 		if ok and type(mods) == "table" then
 			for _, m in mods do
+				if overCap then
+					break
+				end
 				pcall(consider, m)
 			end
 		end
 	end
 
 	local total = #jobs
+	if overCap then
+		print(string.format(
+			"[saveinstance] Prepass SKIPPED — this game has more than %d unique client scripts, too many to safely pre-decompile in parallel (risks an out-of-memory crash). Scripts will still decompile on-demand during the save. Raise PrepassMaxScripts to override, or use noscripts = true for a structure-only save.",
+			maxScripts
+		))
+		return false, "too many scripts (> " .. maxScripts .. "); using on-demand decompile instead"
+	end
 	print("[saveinstance] Prepass: gathered " .. total .. " unique client scripts to decompile")
 	if total == 0 then
 		return true
@@ -2152,7 +2175,9 @@ local function RunDecompilePrepass(ldeccache, O, report)
 					if not job then
 						return
 					end
-					local body = decompile_via_api(job.bc, apiUrl, rateGap)
+					-- re-read bytecode here (jobs hold only the script ref, to keep memory low)
+					local okBc, jbc = pcall(getscriptbytecode, job.script)
+					local body = (okBc and type(jbc) == "string" and jbc ~= "") and decompile_via_api(jbc, apiUrl, rateGap) or nil
 					if body and body ~= "" then
 						-- strip null bytes like the normal decompile path does (they break the XML file)
 						ldeccache[job.key] = (string.gsub(body, "\0", "\\0"))
@@ -2548,6 +2573,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		PrepassConcurrency = 24, -- parallel decompile requests kept in flight
 		PrepassRateGap = 0.12, -- min seconds between API requests (lua.expert rejects unthrottled bursts). Lower = faster if the API allows.
 		PrepassApiUrl = "https://api.lua.expert/decompile",
+		PrepassMaxScripts = 2500, -- safety cap: if the game has more unique client scripts than this, SKIP the prepass (it would risk an out-of-memory crash) and let scripts decompile on-demand during the save instead.
 
 		OptionsAliases = { -- You can't really modify these as a user
 			Streaming = "SetStreaming",
