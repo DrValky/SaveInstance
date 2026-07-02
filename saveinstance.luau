@@ -3049,8 +3049,6 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		end
 	end
 
-	local used_lua_expert = false -- set true when lua.expert (external API) is the active decompiler; credits it in script headers
-
 	do
 		local Decompiler = decompile --OPTIONS.decomptype == "custom" and custom_decompiler or decompile or custom_decompiler
 
@@ -3131,7 +3129,6 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			-- the coroutine-timeout `getbytecode` wrapper — that wrapper returned failure in the save
 			-- context on Volt, so the API was never reached.
 			local canApi = (request or http_request) and base64encode and getscriptbytecode and true or false
-			used_lua_expert = canApi
 			print(string.format(
 				"[saveinstance] lua.expert decompiler setup: canApi=%s (request=%s base64encode=%s getscriptbytecode=%s)",
 				tostring(canApi),
@@ -3697,7 +3694,6 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 										end
 
 										value = "-- Saved by USSI modded by Robloxscripts.com (Join the Discord) discord.robloxscripts.com\n"
-											.. (used_lua_expert and "-- DECOMPILED USING LUA.EXPERT FREE DECOMPILER — Join: https://discord.com/invite/y63m4zUYa4\n" or "")
 											.. "\n"
 											.. (hasLinkedSource and "-- Original Source: https://assetdelivery.roblox.com/v1/asset/?" .. (LinkedSource_type or "id") .. "=" .. (LinkedSource or LinkedSource_Url) .. "\n\n" or "")
 											.. value
