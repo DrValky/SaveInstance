@@ -1783,7 +1783,7 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 --- @field PrepassConcurrency number -- * Parallel decompile requests kept in flight during the prepass. ___Default:___ 24
 --- @field PrepassRateGap number -- * Minimum seconds between decompile-API requests (lua.expert rejects unthrottled bursts). Lower = faster if the API allows. ___Default:___ 0.12
 --- @field PrepassApiUrl string -- * Endpoint used by the decompile prepass. ___Default:___ "https://api.lua.expert/decompile"
---- @field PrepassMaxScripts number -- * Upper bound for `DecompilePrepass`. If the game has more than this many client scripts, the prepass is skipped and scripts decompile on-demand during the save instead. The gather is cheap and decompiles are API-rate-limited, so this just avoids an absurdly long prepass on enormous games — it's not a crash guard. ___Default:___ 20000
+--- @field PrepassMaxScripts number -- * Upper bound for `DecompilePrepass`. If the game has more than this many client scripts, the prepass is skipped and scripts decompile on-demand during the save instead. The gather is cheap, the workers are throttled (reading thousands of scripts' bytecode no longer bursts/crashes), and decompiles are API-rate-limited, so this just avoids an absurdly long prepass on truly enormous games — it's not a crash guard. ___Default:___ 100000
 
 --- @interface OptionsAliases
 --- @within SynSaveInstance
@@ -2161,6 +2161,7 @@ local function RunDecompilePrepass(ldeccache, O, report)
 	-- shared counters are safe without locks).
 	local nextIndex, done, active = 0, 0, math.min(concurrency, total)
 	local prepassStart = os.clock()
+		local last_worker_yield = os.clock()
 	for _ = 1, active do
 		task.spawn(function()
 			pcall(function() -- guard: a throw here must NOT skip `active -= 1`, or the wait below hangs forever
@@ -2192,6 +2193,12 @@ local function RunDecompilePrepass(ldeccache, O, report)
 						end
 						report(done, total, eta)
 					end
+						-- Throttle: reading thousands of scripts' bytecode in a burst crashes huge games. Yielding
+						-- ~every 20ms lets GC keep up (same cadence the working on-demand path uses).
+						if os.clock() - last_worker_yield > 0.02 then
+							last_worker_yield = os.clock()
+							task.wait()
+						end
 				end
 			end)
 			active -= 1
@@ -2574,7 +2581,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		PrepassConcurrency = 24, -- parallel decompile requests kept in flight
 		PrepassRateGap = 0.12, -- min seconds between API requests (lua.expert rejects unthrottled bursts). Lower = faster if the API allows.
 		PrepassApiUrl = "https://api.lua.expert/decompile",
-		PrepassMaxScripts = 20000, -- upper safety bound: only skip the prepass on truly enormous games (the gather is now cheap and decompiles are rate-limited, so this guards against an absurdly long run, not a crash). On-demand decompile takes over if exceeded.
+		PrepassMaxScripts = 100000, -- upper safety bound: only skip the prepass on truly enormous games (the gather is now cheap and decompiles are rate-limited, so this guards against an absurdly long run, not a crash). On-demand decompile takes over if exceeded.
 
 		OptionsAliases = { -- You can't really modify these as a user
 			Streaming = "SetStreaming",
