@@ -1783,7 +1783,7 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 --- @field PrepassConcurrency number -- * Parallel decompile requests kept in flight during the prepass. ___Default:___ 24
 --- @field PrepassRateGap number -- * Minimum seconds between decompile-API requests (lua.expert rejects unthrottled bursts). Lower = faster if the API allows. ___Default:___ 0.12
 --- @field PrepassApiUrl string -- * Endpoint used by the decompile prepass. ___Default:___ "https://api.lua.expert/decompile"
---- @field PrepassMaxScripts number -- * Safety cap for `DecompilePrepass`. If the game has more than this many **unique client scripts**, the prepass is SKIPPED (pre-decompiling that many at once can out-of-memory crash the client — as on huge games like Grow a Garden 2); scripts then decompile on-demand during the save instead. Raise it if your machine can handle more. ___Default:___ 2500
+--- @field PrepassMaxScripts number -- * Upper bound for `DecompilePrepass`. If the game has more than this many client scripts, the prepass is skipped and scripts decompile on-demand during the save instead. The gather is cheap and decompiles are API-rate-limited, so this just avoids an absurdly long prepass on enormous games — it's not a crash guard. ___Default:___ 20000
 
 --- @interface OptionsAliases
 --- @within SynSaveInstance
@@ -2147,7 +2147,7 @@ local function RunDecompilePrepass(ldeccache, O, report)
 	local total = #jobs
 	if overCap then
 		print(string.format(
-			"[saveinstance] Prepass SKIPPED — this game has more than %d client scripts, too many to safely pre-decompile in parallel (risks an out-of-memory crash). Scripts will still decompile on-demand during the save. Raise PrepassMaxScripts to override, or use noscripts = true for a structure-only save.",
+			"[saveinstance] Prepass SKIPPED — this game has more than %d client scripts; pre-decompiling that many via the rate-limited API would take too long. Scripts will still decompile on-demand during the save. Raise PrepassMaxScripts to force it, or use noscripts = true for a structure-only save.",
 			maxScripts
 		))
 		return false, "too many scripts (> " .. maxScripts .. "); using on-demand decompile instead"
@@ -2574,7 +2574,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		PrepassConcurrency = 24, -- parallel decompile requests kept in flight
 		PrepassRateGap = 0.12, -- min seconds between API requests (lua.expert rejects unthrottled bursts). Lower = faster if the API allows.
 		PrepassApiUrl = "https://api.lua.expert/decompile",
-		PrepassMaxScripts = 2500, -- safety cap: if the game has more unique client scripts than this, SKIP the prepass (it would risk an out-of-memory crash) and let scripts decompile on-demand during the save instead.
+		PrepassMaxScripts = 20000, -- upper safety bound: only skip the prepass on truly enormous games (the gather is now cheap and decompiles are rate-limited, so this guards against an absurdly long run, not a crash). On-demand decompile takes over if exceeded.
 
 		OptionsAliases = { -- You can't really modify these as a user
 			Streaming = "SetStreaming",
@@ -3358,6 +3358,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 	end
 
 	local CHUNK_LIMIT = 200 * 1024 * 1024 -- string length overflow prevention
+	local last_save_yield = 0
 	local function save_cache(final)
 		local savestr = table.concat(savebuffer)
 		currentparts[#currentparts + 1] = savestr -- * O(1) append; the chunk string is built once at the boundary below (was `currentstr ..= savestr`, which rebuilt the whole string each call -> O(n^2) + "not enough memory")
@@ -3377,15 +3378,20 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 			currentsize = 0
 		end
 
-		if StatusText then
-			StatusText.Text = "Saving instances: " .. saved_count .. " (" .. get_size_format() .. ")"
-			if ProgressFill and total_count > 0 then
-				ProgressFill.Size = UDim2.new(math.clamp(saved_count / total_count, 0, 0.99), 0, 1, 0)
+		local now = os.clock()
+		-- Yield to keep the client responsive, but time-gated: this used to wait a FULL render
+		-- frame on EVERY ~55KB flush (thousands of frames on a big save = the main slowdown).
+		-- Now we yield + refresh the UI only ~every 30ms of work, independent of flush count.
+		if now - last_save_yield > 0.03 then
+			last_save_yield = now
+			if StatusText then
+				StatusText.Text = "Saving instances: " .. saved_count .. " (" .. get_size_format() .. ")"
+				if ProgressFill and total_count > 0 then
+					ProgressFill.Size = UDim2.new(math.clamp(saved_count / total_count, 0, 0.99), 0, 1, 0)
+				end
 			end
+			wait_for_render()
 		end
-		-- ? Needed for at least 1fps (status text)
-		-- task.wait()
-		wait_for_render()
 	end
 
 	local function save_specific(className, properties)
