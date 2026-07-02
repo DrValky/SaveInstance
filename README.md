@@ -1,6 +1,20 @@
-# SaveInstance 420 Edition — Full Union, Terrain, Color & Mesh Support
+# SaveInstance 420 Edition
 
-A modified build of [UniversalSynSaveInstance (USSI)](https://github.com/luau/UniversalSynSaveInstance) that correctly saves **UnionOperations** (CSG `MeshData2` geometry) and **Terrain**, with optional **full-map streaming** and a **parallel decompile prepass** for fast, complete saves of big games.
+The saveinstance that actually saves your game **the way it looks.**
+
+Most saveinstance scripts hand you a broken file — grey parts, missing images, no scripts, half the map. This one doesn't.
+
+## Why use this one
+
+- 🎨 **Correct colors & sizes** — other savers drop these and everything loads grey and default-sized. This saves them right.
+- 🖼️ **Decals, images & sounds save** — the stuff modern savers silently miss.
+- 🧩 **Unions & terrain render properly** — not invisible, not grey boxes.
+- 🗺️ **Grabs the WHOLE map** — force-loads streaming games so you get the entire place, not just what's next to you.
+- 📜 **Decompiles scripts even if your executor can't** — free built-in fallback, plus a fast parallel mode for script-heavy games.
+- ☀️ **Opens bright** — optional one-liner so your save isn't dark and foggy.
+- 🧱 **Recovers meshes** — pull private mesh geometry out to `.obj` (Blender-ready).
+- ⚡ **Fast and won't crash** — handles huge games without running out of memory.
+- 🔌 **Works on any executor** — Volt, Solara, Wave, and the rest.
 
 ## Usage
 
@@ -12,57 +26,21 @@ local Params = {
 
 local synsaveinstance = loadstring(game:HttpGet(Params.RepoURL .. Params.SSI .. ".luau", true), Params.SSI)()
 
-local Options = {
-    safemode = false,
-    SetStreaming = false,     -- set true to force-load the entire StreamingEnabled map first (whole map, not just nearby chunks)
-    DecompilePrepass = false, -- set true to decompile all scripts in parallel before saving (big speedup on script-heavy games)
-    -- Full option list: https://realslimshady2000.github.io/SaveInstance420Edition/api/SynSaveInstance
-}
-
-synsaveinstance(Options)
+synsaveinstance({
+    SetStreaming = false,       -- true = capture the whole streaming map
+    DecompilePrepass = false,   -- true = decompile all scripts fast, up front
+    NeutralizeLighting = false, -- true = save opens in bright daylight
+    ExportObj = false,          -- true = also dump meshes to a .obj
+})
 ```
 
-`SetStreaming` and `DecompilePrepass` are **off by default** — turn on the ones you need. It all runs from this one call; no separate scripts required.
+That's it — one call, no extra scripts. Every option is off by default; flip on what you want.
 
-## What's different from the normal save instance
-
-- **Unions render correctly.** Re-enabled `gethiddenproperty` during the save (it was being disabled unconditionally) so the union's `MeshData2` is actually read, and stopped `IgnoreSharedStrings` from dropping the `MeshData2` / `ChildData2` SharedStrings. On executors that can't read union mesh data, unions fall back to a visible bounding-box Part instead of being invisible.
-- **Terrain** `SmoothGrid` / `PhysicsGrid` are serialized.
-- **`SetStreaming`** — force-loads an entire `StreamingEnabled` map before saving so the whole map is captured (see below).
-- **`DecompilePrepass`** — decompiles every client script in parallel before saving so the save's decompile step is near-instant (see below).
-- **Faster, lighter saves** — the file is assembled with a table buffer instead of repeated string concatenation, fixing the `O(n²)` growth that caused "not enough memory" on large games.
-- **Executor capability check** — on each save it prints (console) which required functions your executor is missing (`gethiddenproperty`, `decompile`, `request`, `sethiddenproperty`, …) and the impact, so you know up front why a save might be incomplete.
-- **`UseUGCValidationService`** (default `true`) — set `false` to never use `UGCValidationService` as a hidden-property fallback (some executors flag or lack it); `gethiddenproperty` is still used.
-- **`NeutralizeLighting`** (default `false`) — set `true` to reset `Lighting` (ClockTime/Fog/Ambient), `Atmosphere`, post-effects (ColorCorrection/Bloom/Blur/SunRays/DoF) and clouds to clean midday right before saving, so the place opens **bright** instead of inheriting the game's dark/foggy/night atmosphere (the "all grey on the camera" look). Default keeps the game's real lighting.
-- A progress bar (with ETA) accompanies the on-screen save status.
-- **`Debug = true`** writes a detailed `saveinstance-debug.txt` to your executor workspace (executor, capabilities, options, streaming/prepass/decompile stats, save result) — handy for troubleshooting.
-
-> Note: `ChildData` is `NotReplicated`, so client-side saves render unions but can't make them editable/separable in Studio.
-
-## Map streaming — `SetStreaming`
-
-Many big maps use **StreamingEnabled**, which only loads the chunks near your character — so a normal save captures just a fraction of the map. With `SetStreaming = true`, the tool pins all loaded content (`ModelStreamingMode = Persistent`) so nothing streams back out, then sweeps the whole map firing **concurrent** `RequestStreamAroundAsync` requests (each yields when its region loads — faster than teleport-and-poll). Runs headlessly with progress in the status bar, then saving begins automatically. Expect lag on large maps.
-
-**`StreamingConcurrency` and `StreamingMaxTime` auto-scale to the map size** by default (`false` = auto): small maps finish fast, big/ocean-heavy maps get more workers and a longer time cap (60s–15m) so they aren't cut off before the real content loads. The sweep always gives up on stuck/empty chunks and proceeds, so it never hangs. Override either with a number if you want manual control. Each chunk waits until its region actually stops loading new parts (stability detection, capped by `StreamingChunkWait` = 12s) rather than a fixed delay, and a `StreamingSettleTime` (3s) pass lets in-flight loads finish before saving. On `StreamingEnabled` maps the terrain is also re-captured after the sweep (it's read before streaming, so otherwise only spawn-area terrain would save — the "squares of water" problem). Other tunables: `StreamingAreaSize` (10000 — raise for maps wider than 10k studs), `StreamingRadius` (auto-detected), `StreamingSlices` (2), `StreamingTimeout` (20). Based on / speeds up [centerepic/Streamer7](https://github.com/centerepic/Streamer7).
-
-## Decompiling — lua.expert fallback + `DecompilePrepass`
-
-If your executor has **no decompiler** (e.g. Volt), scripts are automatically decompiled via the **[lua.expert](https://lua.expert)** free API instead of being saved as "no decompiler" stubs. Decompiled scripts are credited to lua.expert in their header.
-
-`DecompilePrepass = true` makes this fast on script-heavy games: every client script is decompiled **in parallel** via the API and cached *before* saving, so the save's per-script decompile becomes an instant cache hit. Without the prepass, scripts are decompiled on demand during the save (slower, but still works).
-
-> Heads-up: this sends script bytecode to a **third-party API** (`api.lua.expert`) and needs `getscriptbytecode` plus an HTTP function (`request` / `http_request`). `DecompilePrepass` is **off by default**. Tunables: `PrepassConcurrency` (24), `PrepassRateGap` (0.12 — min seconds between API requests; lower = faster if the API allows, raise if you get failures), `PrepassApiUrl`. Based on [centerepic/ussiprepass](https://gitlab.com/centerepic/ussiprepass); decompiler API by [lua.expert](https://discord.com/invite/y63m4zUYa4).
+📖 **Full option list:** https://realslimshady2000.github.io/SaveInstance420Edition/
 
 ## Credits
 
-All credit for the original SaveInstance goes to the **luau** project — please support them:
-
-- Project home & docs: **[luau.github.io](https://luau.github.io/)**
-- Source: [luau/UniversalSynSaveInstance](https://github.com/luau/UniversalSynSaveInstance)
-- API reference: [luau.github.io/UniversalSynSaveInstance/api/SynSaveInstance](https://luau.github.io/UniversalSynSaveInstance/api/SynSaveInstance)
-
-Streaming & prepass approaches by [centerepic](https://github.com/centerepic) ([Streamer7](https://github.com/centerepic/Streamer7), [ussiprepass](https://gitlab.com/centerepic/ussiprepass)).
-
-Decompiler API: **[lua.expert](https://lua.expert)** — free decompiler ([Discord](https://discord.com/invite/y63m4zUYa4)).
+Built on the original **[UniversalSynSaveInstance](https://luau.github.io/)** by the luau project — please support them.
+Streaming & prepass ideas by [centerepic](https://github.com/centerepic). Decompiler by [lua.expert](https://lua.expert).
 
 Modified by **Robloxscripts.com** — Discord: discord.robloxscripts.com

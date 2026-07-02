@@ -4,10 +4,7 @@ sidebar_position: 1
 
 # Getting Started
 
-A modified build of **UniversalSynSaveInstance (USSI)** that correctly saves
-**UnionOperations**, **Terrain**, **MeshPart colors/sizes**, **decals/images/sounds**, with optional
-**full-map streaming**, a **parallel decompile prepass**, **lighting neutralization**, and a
-**`.obj` mesh-geometry exporter** for recovering private meshes.
+The saveinstance that actually saves your game **the way it looks** — correct colors, images, unions, terrain, the whole map, and even the scripts. No more grey, broken, half-empty saves.
 
 ## Usage
 
@@ -20,27 +17,26 @@ local Params = {
 local synsaveinstance = loadstring(game:HttpGet(Params.RepoURL .. Params.SSI .. ".luau", true), Params.SSI)()
 
 synsaveinstance({
-    -- all optional, all default false — flip to true to enable:
-    SetStreaming = false,       -- force-load an entire StreamingEnabled map before saving
-    DecompilePrepass = false,   -- decompile all scripts in parallel before saving (script-heavy games)
-    NeutralizeLighting = false, -- open the saved place in clean daylight, not the game's dark/foggy lighting
-    ExportObj = false,          -- also bake all MeshPart geometry to a .obj (recovers private meshes)
+    SetStreaming = false,       -- true = capture the whole streaming map
+    DecompilePrepass = false,   -- true = decompile all scripts fast, up front
+    NeutralizeLighting = false, -- true = save opens in bright daylight
+    ExportObj = false,          -- true = also dump meshes to a .obj
 })
 ```
 
-See the **[Options Reference](./options)** for a clean, grouped breakdown of every option (or the raw [SynSaveInstance API](../api/SynSaveInstance)).
+One call, no extra scripts. Every option is off by default — flip on what you want.
 
-## What's different from normal SaveInstance
+## Why use this one
 
-- **Unions render correctly** — `MeshData2` / `ChildData2` / `PhysicalConfigData` are saved.
-- **Part Color & Size are saved** — uses the official Roblox CDN API dump (community dumps strip the
-  serialized `Color3uint8` / `size` members, which made parts load grey & default-sized).
-- **Decals, images & sounds are saved** — the new `Content` DataType (Image/Texture/SoundId) is handled.
-- **Terrain** `SmoothGrid` / `PhysicsGrid` are serialized (and re-captured after streaming).
-- **`SetStreaming`** — force-loads an entire StreamingEnabled map before saving.
-- **`NeutralizeLighting`** — resets Lighting/Atmosphere/effects to clean midday.
-- **`ExportObj`** — recovers private MeshPart geometry to a world-space `.obj` (Blender / Studio import).
-- **`DecompilePrepass`** + **lua.expert fallback** — fast, complete decompiles on script-heavy games.
+- 🎨 **Colors & sizes save right** (others load everything grey and default-sized)
+- 🖼️ **Decals, images & sounds save** (the stuff most savers miss)
+- 🧩 **Unions & terrain render properly**
+- 🗺️ **Grabs the whole streaming map**, not just what's near you
+- 📜 **Decompiles scripts even if your executor can't**
+- ☀️ **Opens bright** instead of dark and foggy
+- 🧱 **Recovers meshes** to `.obj`
+- ⚡ **Fast and won't crash** on huge games
 
-> Credit for the original SaveInstance goes to the **[luau](https://luau.github.io/)** project.
-> Modified by **Robloxscripts.com** — Discord: discord.robloxscripts.com
+👉 See the **[Options Reference](./options)** for every setting.
+
+> Built on the original **[UniversalSynSaveInstance](https://luau.github.io/)**. Modified by **Robloxscripts.com** — Discord: discord.robloxscripts.com
