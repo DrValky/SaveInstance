@@ -1783,7 +1783,7 @@ local GLOBAL_ENV = getgenv and getgenv() or _G or shared
 --- @field PrepassConcurrency number -- * Parallel decompile requests kept in flight during the prepass. ___Default:___ 24
 --- @field PrepassRateGap number -- * Minimum seconds between decompile-API requests (lua.expert rejects unthrottled bursts). Lower = faster if the API allows. ___Default:___ 0.12
 --- @field PrepassApiUrl string -- * Endpoint used by the decompile prepass. ___Default:___ "https://api.lua.expert/decompile"
---- @field PrepassMaxScripts number -- * Upper bound for `DecompilePrepass`. If the game has more than this many client scripts, the prepass is skipped and scripts decompile on-demand during the save instead. The gather is cheap, the workers are throttled (reading thousands of scripts' bytecode no longer bursts/crashes), and decompiles are API-rate-limited, so this just avoids an absurdly long prepass on truly enormous games — it's not a crash guard. ___Default:___ 100000
+--- @field PrepassMaxScripts number -- * Upper bound for `DecompilePrepass`. If the game has more than this many client scripts, the prepass is skipped and scripts decompile on-demand during the save instead. The gather is cheap, the workers are throttled (reading thousands of scripts' bytecode no longer bursts/crashes), and decompiles are API-rate-limited, so this just avoids an absurdly long prepass on games so large the prepass would risk destabilizing an already memory-heavy client (e.g. Grow a Garden 2 with 25k+ scripts); those fall back to the stable on-demand decompile. ___Default:___ 6000
 
 --- @interface OptionsAliases
 --- @within SynSaveInstance
@@ -2454,6 +2454,14 @@ local function export_map_obj(root, objName, report)
 	return true, { meshParts = total, written = written, skipped = skipped, uniqueMeshes = uniq, verts = vOff }
 end
 
+local function fmt_eta(sec)
+	sec = math.max(0, math.ceil(sec))
+	if sec >= 60 then
+		return string.format("%dm %ds", math.floor(sec / 60), sec % 60)
+	end
+	return sec .. "s"
+end
+
 local function synsaveinstance(CustomOptions, CustomOptions2)
 	if GLOBAL_ENV.USSI then
 		return
@@ -2581,7 +2589,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 		PrepassConcurrency = 24, -- parallel decompile requests kept in flight
 		PrepassRateGap = 0.12, -- min seconds between API requests (lua.expert rejects unthrottled bursts). Lower = faster if the API allows.
 		PrepassApiUrl = "https://api.lua.expert/decompile",
-		PrepassMaxScripts = 100000, -- upper safety bound: only skip the prepass on truly enormous games (the gather is now cheap and decompiles are rate-limited, so this guards against an absurdly long run, not a crash). On-demand decompile takes over if exceeded.
+		PrepassMaxScripts = 6000, -- upper safety bound: only skip the prepass on truly enormous games (the gather is now cheap and decompiles are rate-limited, so this guards against an absurdly long run, not a crash). On-demand decompile takes over if exceeded.
 
 		OptionsAliases = { -- You can't really modify these as a user
 			Streaming = "SetStreaming",
@@ -4283,7 +4291,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						"Streaming map: %d / %d chunks%s",
 						streamed,
 						totalChunks,
-						eta and string.format(" (~%ds left)", math.ceil(eta)) or ""
+						eta and (" (~" .. fmt_eta(eta) .. " left)") or ""
 					)
 				end
 				if ProgressFill and totalChunks > 0 then
@@ -4369,7 +4377,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						"Decompile prepass: %d / %d scripts%s",
 						decompiled,
 						totalScripts,
-						eta and string.format(" (~%ds left)", math.ceil(eta)) or ""
+						eta and (" (~" .. fmt_eta(eta) .. " left)") or ""
 					)
 				end
 				if ProgressFill and totalScripts > 0 then
