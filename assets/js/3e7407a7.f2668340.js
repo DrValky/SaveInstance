@@ -1,0 +1,1 @@
+"use strict";(self.webpackChunkdocs=self.webpackChunkdocs||[]).push([[605],{4410:e=>{e.exports=JSON.parse('{"sourceUrl":"https://github.com/RealSlimShady2000/SaveInstance420Edition/blob/master","baseUrl":"/SaveInstance420Edition/","classOrder":[],"apiCategories":[]}')}}]);
