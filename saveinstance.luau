@@ -3513,17 +3513,24 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 				if not (IgnorePropertiesOfNotScriptsOnScriptsMode and not isLuaSourceContainer(instance)) then
 					local default_instance, new_def_inst
 
-					if IPM_DISABLED and IgnoreDefaultProperties then
+if IPM_DISABLED and IgnoreDefaultProperties then
 						default_instance = default_instances[ClassName]
 						if not default_instance then
 							local ClassTags = ClassList[ClassName].Tags
 							if not (ClassTags and ClassTags.NotCreatable) then -- __api_dump_class_not_creatable__ also indicates this
 								-- ! NotCreatableFixes are exceptions to the check above meaning if we don't keep the NotCreatableFixes updated then Instance.new below might start erroring in the future potentially; HOWEVER IsPropertyModified solves this issue and no updates are really needed as NotCreatableFixes is up-to-date as of 664 (which is when IPM was enabled)
-								new_def_inst = Instance.new(ClassName) -- ! Assuming anything that doesn't have NotCreatable is possible to create (therefore no pcall); EXCEPTION NOTED ABOVE
-
-								default_instance = {}
-
-								default_instances[ClassName] = default_instance
+								local ok_new
+								ok_new, new_def_inst = pcall(Instance.new, ClassName) -- pcall: some classes (e.g. AnalyticsService) aren't creatable even without the NotCreatable tag if the API Dump is outdated/incomplete
+								if ok_new then
+									default_instance = {}
+									default_instances[ClassName] = default_instance
+								else
+									new_def_inst = nil
+									default_instance = nil
+									if __DEBUG_MODE then
+										__DEBUG_MODE("Unable to create default Instance (pcall failed)", ClassName)
+									end
+								end
 							elseif __DEBUG_MODE then
 								__DEBUG_MODE("Unable to create default Instance", ClassName)
 							end
