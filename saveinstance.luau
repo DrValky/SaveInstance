@@ -3623,7 +3623,7 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						local tag, value
 						if Category == "Class" then
 							tag = "Ref"
-							if raw then
+							if typeof(raw) == "Instance" then
 								if SaveNotCreatableWillBeEnabled then
 									local Fix = NotCreatableFixes[raw.ClassName]
 									if
