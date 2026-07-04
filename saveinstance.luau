@@ -48,11 +48,15 @@ end
 if gethiddenproperty and realcheck then
 	getgenv().gethiddenpropertygethiddenproperty = gethiddenproperty
 
-	-- Dump the raw terrain grids now. They are base64-encoded later (after `base64encode` is set up)
-	-- with the FAST encoder. The pure-Lua to_base64 used to run here and FROZE the client on big maps,
-	-- where SmoothGrid/PhysicsGrid are multiple megabytes.
-	writefile("SmoothGrid.txt", gethiddenpropertygethiddenproperty(workspace.Terrain, "SmoothGrid"))
-	writefile("PhysicsGrid.txt", gethiddenpropertygethiddenproperty(workspace.Terrain, "PhysicsGrid"))
+	local smooth = gethiddenpropertygethiddenproperty(workspace.Terrain, "SmoothGrid")
+	local physics = gethiddenpropertygethiddenproperty(workspace.Terrain, "PhysicsGrid")
+
+	if type(smooth) == "string" and type(physics) == "string" then
+		writefile("SmoothGrid.txt", smooth)
+		writefile("PhysicsGrid.txt", physics)
+	else
+		realcheck = false
+	end
 end
 
 local function string_find(s, pattern)
@@ -4303,9 +4307,16 @@ local function synsaveinstance(CustomOptions, CustomOptions2)
 						StatusText.Text = "Waiting for terrain to finish loading..."
 					end
 					wait_terrain_loaded(terrainGHP, math.clamp((tonumber(OPTIONS.StreamingSettleTime) or 5) * 2, 6, 25))
-					local reOk = pcall(function()
-						getfenv().physicsgrid = base64encode(terrainGHP(workspace.Terrain, "PhysicsGrid"))
-						getfenv().smoothgrid = base64encode(terrainGHP(workspace.Terrain, "SmoothGrid"))
+						local reOk = pcall(function()
+						local physics = terrainGHP(workspace.Terrain, "PhysicsGrid")
+						local smooth = terrainGHP(workspace.Terrain, "SmoothGrid")
+						if type(physics) == "string" and physics ~= ""
+							and type(smooth) == "string" and smooth ~= "" then
+							getfenv().physicsgrid = base64encode(physics)
+							getfenv().smoothgrid = base64encode(smooth)
+						else
+							error("terrain grids not readable after streaming")
+						end
 					end)
 					print("[saveinstance] Terrain " .. (reOk and "re-captured after streaming." or "re-capture failed (keeping load-time copy)."))
 					dbg("[stream] terrain re-capture ok=", reOk)
